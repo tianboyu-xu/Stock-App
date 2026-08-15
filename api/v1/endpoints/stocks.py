@@ -1,0 +1,757 @@
+# -*- coding: utf-8 -*-
+"""
+===================================
+股票数据接口
+===================================
+
+职责：
+1. POST /api/v1/stocks/extract-from-image 从图片提取股票代码
+2. POST /api/v1/stocks/parse-import 解析 CSV/Excel/剪贴板
+3. GET /api/v1/stocks/{code}/quote 实时行情接口
+4. GET /api/v1/stocks/{code}/history 历史行情接口
+"""
+
+import logging
+from typing import Optional
+import re
+
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, Depends
+
+from api.deps import get_system_config_service
+
+from api.v1.schemas.stocks import (
+    ExtractFromImageResponse,
+    ExtractItem,
+    IndicatorTriggers,
+    KLineData,
+    StockHistoryResponse,
+    StockIndicatorsResponse,
+    StockQuote,
+)
+from api.v1.schemas.history import WatchlistReorderRequest, WatchlistRequest, WatchlistResponse
+from api.v1.schemas.common import ErrorResponse
+from src.services.image_stock_extractor import (
+    ALLOWED_MIME,
+    MAX_SIZE_BYTES,
+    extract_stock_codes_from_image,
+)
+from src.services.import_parser import (
+    MAX_FILE_BYTES,
+    parse_import_from_bytes,
+    parse_import_from_text,
+)
+from src.services.stock_service import StockService
+from src.services.stock_list_parser import split_stock_list
+from src.services.system_config_service import SystemConfigService
+from data_provider.base import normalize_stock_code
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+# 须在 /{stock_code} 路由之前定义
+ALLOWED_MIME_STR = ", ".join(ALLOWED_MIME)
+
+
+def _read_watchlist_codes(service: SystemConfigService) -> list:
+    """Read STOCK_LIST codes as-is (no normalization)."""
+    config_data = service.get_config(include_schema=False)
+    stock_list_str = ""
+    for item in config_data.get("items", []):
+        if item.get("key") == "STOCK_LIST":
+            stock_list_str = str(item.get("value", ""))
+            break
+    return split_stock_list(stock_list_str)
+
+
+def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
+    """Persist stock codes to STOCK_LIST as-is (no normalization)."""
+    config_data = service.get_config(include_schema=False)
+    config_version = config_data.get("config_version", "")
+    service.update(
+        config_version=config_version,
+        items=[{"key": "STOCK_LIST", "value": ",".join(codes)}],
+        mask_token="******",
+        reload_now=True,
+    )
+
+
+# Stock code validation patterns (aligned with frontend validateStockCode)
+_STOCK_CODE_RE = re.compile(
+    r"^(?:\d{6}"                              # A-share 6-digit
+    r"|(?:SH|SZ|BJ)\d{6}"                     # exchange-prefixed A-share
+    r"|\d{6}\.(?:SH|SZ|SS|BJ)"                # exchange-suffixed A-share
+    r"|\d{1,5}\.HK"                           # HK suffix format
+    r"|HK\d{1,5}"                             # HK prefix format
+    r"|\d{5}"                                 # bare 5-digit HK code
+    r"|[A-Z]{1,5}(?:\.(?:US|[A-Z]))?"         # US ticker
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _validate_and_normalize_stock_code(code: str) -> str:
+    """Validate stock code format and return canonical form.
+
+    Raises HTTPException(400) if the code does not match supported formats.
+    """
+    stripped = code.strip()
+    if not stripped:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_stock_code", "message": "股票代码不能为空"},
+        )
+    if not _STOCK_CODE_RE.match(stripped):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_stock_code",
+                "message": f"'{stripped}' 不是合法的股票代码格式",
+            },
+        )
+    return normalize_stock_code(stripped)
+
+
+def _watchlist_match_key(code: str) -> str:
+    """Return the equivalence key used for watchlist add/remove matching."""
+    normalized = normalize_stock_code(code.strip())
+    if re.fullmatch(r"\d{5}", normalized):
+        return f"HK{normalized}"
+    return normalized.upper()
+
+
+@router.post(
+    "/extract-from-image",
+    response_model=ExtractFromImageResponse,
+    responses={
+        200: {"description": "提取的股票代码"},
+        400: {"description": "图片无效", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="从图片提取股票代码",
+    description="上传截图/图片，通过 Vision LLM 提取股票代码。支持 JPEG、PNG、WebP、GIF，最大 5MB。",
+)
+def extract_from_image(
+    file: Optional[UploadFile] = File(None, description="图片文件（表单字段名 file）"),
+    include_raw: bool = Query(False, description="是否在结果中包含原始 LLM 响应"),
+) -> ExtractFromImageResponse:
+    """
+    从上传的图片中提取股票代码（使用 Vision LLM）。
+
+    表单字段请使用 file 上传图片。优先级：Gemini / Anthropic / OpenAI（首个可用）。
+    """
+    if not file or not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "bad_request", "message": "未提供文件，请使用表单字段 file 上传图片"},
+        )
+
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in ALLOWED_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_type",
+                "message": f"不支持的类型: {content_type}。允许: {ALLOWED_MIME_STR}",
+            },
+        )
+
+    try:
+        # 先读取限定大小，再检查是否还有剩余（语义清晰：超出则拒绝）
+        data = file.file.read(MAX_SIZE_BYTES)
+        if file.file.read(1):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "file_too_large",
+                    "message": f"图片超过 {MAX_SIZE_BYTES // (1024 * 1024)}MB 限制",
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"读取上传文件失败: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "read_failed", "message": "读取上传文件失败"},
+        )
+
+    try:
+        items, raw_text = extract_stock_codes_from_image(data, content_type)
+        extract_items = [
+            ExtractItem(code=code, name=name, confidence=conf) for code, name, conf in items
+        ]
+        codes = [i.code for i in extract_items]
+        return ExtractFromImageResponse(
+            codes=codes,
+            items=extract_items,
+            raw_text=raw_text if include_raw else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "extract_failed", "message": str(e)})
+    except Exception as e:
+        logger.error(f"图片提取失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": "图片提取失败"},
+        )
+
+
+@router.post(
+    "/parse-import",
+    response_model=ExtractFromImageResponse,
+    responses={
+        200: {"description": "解析结果"},
+        400: {"description": "未提供数据或解析失败", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="解析 CSV/Excel/剪贴板",
+    description="上传 CSV/Excel 文件或粘贴文本，自动解析股票代码。文件上限 2MB，文本上限 100KB。",
+)
+async def parse_import(request: Request) -> ExtractFromImageResponse:
+    """
+    解析 CSV/Excel 文件或剪贴板文本。
+
+    - multipart/form-data + file: 上传文件
+    - application/json + {"text": "..."}: 粘贴文本
+    - 优先使用 file，若同时提供则忽略 text
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception as e:
+            logger.warning("[parse_import] JSON parse failed: %s", e)
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_json", "message": f"JSON 解析失败: {e}"},
+            )
+        text = body.get("text") if isinstance(body, dict) else None
+        if not text or not isinstance(text, str):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "bad_request", "message": "未提供 text，请使用 {\"text\": \"...\"}"},
+            )
+        try:
+            items = parse_import_from_text(text)
+        except ValueError as e:
+            text_bytes = len(text.encode("utf-8"))
+            logger.warning(
+                "[parse_import] parse_import_from_text failed: text_bytes=%d, error=%s",
+                text_bytes,
+                e,
+            )
+            raise HTTPException(status_code=400, detail={"error": "parse_failed", "message": str(e)})
+    elif "multipart" in content_type:
+        form = await request.form()
+        file = form.get("file")
+        if not file or not hasattr(file, "read"):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "bad_request", "message": "未提供文件，请使用表单字段 file"},
+            )
+        file_size = getattr(file, "size", None)
+        if isinstance(file_size, int) and file_size > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "file_too_large",
+                    "message": f"文件超过 {MAX_FILE_BYTES // (1024 * 1024)}MB 限制",
+                },
+            )
+        try:
+            data = file.file.read(MAX_FILE_BYTES)
+            if file.file.read(1):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "file_too_large",
+                        "message": f"文件超过 {MAX_FILE_BYTES // (1024 * 1024)}MB 限制",
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            filename = getattr(file, "filename", None) or ""
+            size = getattr(file, "size", None)
+            logger.warning(
+                "[parse_import] file read failed: filename=%r, size=%s, error=%s",
+                filename,
+                size,
+                e,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "read_failed", "message": "读取文件失败"},
+            )
+        filename = getattr(file, "filename", None) or ""
+        try:
+            items = parse_import_from_bytes(data, filename=filename)
+        except ValueError as e:
+            ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            logger.warning(
+                "[parse_import] parse_import_from_bytes failed: filename=%r, ext=%r, bytes=%d, error=%s",
+                filename,
+                ext,
+                len(data),
+                e,
+            )
+            raise HTTPException(status_code=400, detail={"error": "parse_failed", "message": str(e)})
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "bad_request",
+                "message": "请使用 multipart/form-data 上传文件，或 application/json 提交 {\"text\": \"...\"}",
+            },
+        )
+
+    extract_items = [
+        ExtractItem(code=code, name=name, confidence=conf)
+        for code, name, conf in items
+    ]
+    codes = list(dict.fromkeys(i.code for i in extract_items if i.code))
+    return ExtractFromImageResponse(codes=codes, items=extract_items, raw_text=None)
+
+
+@router.get(
+    "/watchlist",
+    response_model=WatchlistResponse,
+    responses={
+        200: {"description": "当前自选队列"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取自选队列",
+    description="返回当前 STOCK_LIST 配置中的所有股票代码。",
+)
+def get_watchlist(
+    service: SystemConfigService = Depends(get_system_config_service),
+) -> WatchlistResponse:
+    try:
+        codes = _read_watchlist_codes(service)
+        return WatchlistResponse(stock_codes=codes, message=f"当前自选 {len(codes)} 只股票")
+    except Exception as e:
+        logger.error(f"获取自选队列失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"获取自选队列失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/watchlist/add",
+    response_model=WatchlistResponse,
+    responses={
+        200: {"description": "已加入自选"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="加入自选队列",
+    description="将指定股票代码加入 STOCK_LIST。",
+)
+def add_to_watchlist(
+    request: WatchlistRequest,
+    service: SystemConfigService = Depends(get_system_config_service),
+) -> WatchlistResponse:
+    try:
+        validated = _validate_and_normalize_stock_code(request.stock_code)
+        codes = _read_watchlist_codes(service)
+        existing_keys = [_watchlist_match_key(c) for c in codes]
+        if _watchlist_match_key(validated) not in existing_keys:
+            codes.append(request.stock_code.strip())
+            _write_watchlist_codes(service, codes)
+        return WatchlistResponse(stock_codes=codes, message=f"已加入 {request.stock_code.strip()}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"加入自选失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"加入自选失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/watchlist/remove",
+    response_model=WatchlistResponse,
+    responses={
+        200: {"description": "已从自选删除"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="从自选队列删除",
+    description="从 STOCK_LIST 中移除指定股票代码。",
+)
+def remove_from_watchlist(
+    request: WatchlistRequest,
+    service: SystemConfigService = Depends(get_system_config_service),
+) -> WatchlistResponse:
+    try:
+        validated = _validate_and_normalize_stock_code(request.stock_code)
+        codes = _read_watchlist_codes(service)
+        existing_keys = [_watchlist_match_key(c) for c in codes]
+        requested_key = _watchlist_match_key(validated)
+        if requested_key in existing_keys:
+            idx = existing_keys.index(requested_key)
+            codes.pop(idx)
+            _write_watchlist_codes(service, codes)
+        return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"从自选删除失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"从自选删除失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/watchlist/reorder",
+    response_model=WatchlistResponse,
+    responses={
+        200: {"description": "已重排自选队列"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="重排自选队列",
+    description="按请求顺序重排 STOCK_LIST；重复代码去重、未知代码忽略，未提及的现有代码追加到末尾。",
+)
+def reorder_watchlist(
+    request: WatchlistReorderRequest,
+    service: SystemConfigService = Depends(get_system_config_service),
+) -> WatchlistResponse:
+    try:
+        existing = _read_watchlist_codes(service)
+        existing_keys = [_watchlist_match_key(c) for c in existing]
+        ordered: list = []
+        seen_keys = set()
+        for raw in request.stock_codes:
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            key = _watchlist_match_key(stripped)
+            if key in seen_keys:
+                continue
+            if key in existing_keys:
+                ordered.append(existing[existing_keys.index(key)])
+                seen_keys.add(key)
+        for code in existing:
+            key = _watchlist_match_key(code)
+            if key not in seen_keys:
+                ordered.append(code)
+                seen_keys.add(key)
+        _write_watchlist_codes(service, ordered)
+        return WatchlistResponse(stock_codes=ordered, message="已重排自选队列")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"重排自选失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"重排自选失败: {str(e)}"},
+        )
+
+
+@router.get(
+    "/{stock_code}/quote",
+    response_model=StockQuote,
+    responses={
+        200: {"description": "行情数据"},
+        404: {"description": "股票不存在", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取股票实时行情",
+    description="获取指定股票的最新行情数据"
+)
+def get_stock_quote(stock_code: str) -> StockQuote:
+    """
+    获取股票实时行情
+    
+    获取指定股票的最新行情数据
+    
+    Args:
+        stock_code: 股票代码（如 600519、00700、AAPL）
+        
+    Returns:
+        StockQuote: 实时行情数据
+        
+    Raises:
+        HTTPException: 404 - 股票不存在
+    """
+    try:
+        service = StockService()
+        
+        # 使用 def 而非 async def，FastAPI 自动在线程池中执行
+        result = service.get_realtime_quote(stock_code)
+        
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "message": f"未找到股票 {stock_code} 的行情数据"
+                }
+            )
+        
+        return StockQuote(
+            stock_code=result.get("stock_code", stock_code),
+            stock_name=result.get("stock_name"),
+            current_price=result.get("current_price", 0.0),
+            change=result.get("change"),
+            change_percent=result.get("change_percent"),
+            open=result.get("open"),
+            high=result.get("high"),
+            low=result.get("low"),
+            prev_close=result.get("prev_close"),
+            volume=result.get("volume"),
+            amount=result.get("amount"),
+            update_time=result.get("update_time")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取实时行情失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取实时行情失败: {str(e)}"
+            }
+        )
+
+
+@router.get(
+    "/{stock_code}/history",
+    response_model=StockHistoryResponse,
+    responses={
+        200: {"description": "历史行情数据"},
+        422: {"description": "不支持的周期参数", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取股票历史行情",
+    description="获取指定股票的历史 K 线数据"
+)
+def get_stock_history(
+    stock_code: str,
+    period: str = Query("daily", description="K 线周期", pattern="^(daily|weekly|monthly)$"),
+    days: int = Query(30, ge=1, le=365, description="获取天数")
+) -> StockHistoryResponse:
+    """
+    获取股票历史行情
+    
+    获取指定股票的历史 K 线数据
+    
+    Args:
+        stock_code: 股票代码
+        period: K 线周期 (daily/weekly/monthly)
+        days: 获取天数
+        
+    Returns:
+        StockHistoryResponse: 历史行情数据
+    """
+    try:
+        service = StockService()
+        
+        # 使用 def 而非 async def，FastAPI 自动在线程池中执行
+        result = service.get_history_data(
+            stock_code=stock_code,
+            period=period,
+            days=days
+        )
+        
+        # 转换为响应模型
+        data = [
+            KLineData(
+                date=item.get("date"),
+                open=item.get("open"),
+                high=item.get("high"),
+                low=item.get("low"),
+                close=item.get("close"),
+                volume=item.get("volume"),
+                amount=item.get("amount"),
+                change_percent=item.get("change_percent")
+            )
+            for item in result.get("data", [])
+        ]
+        
+        return StockHistoryResponse(
+            stock_code=stock_code,
+            stock_name=result.get("stock_name"),
+            period=period,
+            data=data
+        )
+    
+    except ValueError as e:
+        # period 参数不支持的错误（如 weekly/monthly）
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unsupported_period",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        logger.error(f"获取历史行情失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取历史行情失败: {str(e)}"
+            }
+        )
+
+
+@router.get(
+    "/{stock_code}/indicators",
+    response_model=StockIndicatorsResponse,
+    responses={
+        200: {"description": "技术指标数据"},
+        422: {"description": "不支持的周期参数", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="获取股票技术指标",
+    description="按 Excel \"300 Plot\" 逻辑计算 SMA/EMA/MACD/KDJ/RSI/BOLL/CCI/OBV 及买卖触发器",
+)
+def get_stock_indicators(
+    stock_code: str,
+    period: str = Query("daily", description="K 线周期", pattern="^(daily|weekly|monthly)$"),
+    days: int = Query(365, ge=7, le=365, description="获取天数"),
+    bol_constant: Optional[float] = Query(None, description="BOL constant 阈值"),
+    macd_buy: Optional[float] = Query(None, description="MACD Buy 阈值"),
+    macd_sell: Optional[float] = Query(None, description="MACD Sell 阈值"),
+    kdj_buy: Optional[float] = Query(None, description="KDJ Buy 阈值"),
+    kdj_sell: Optional[float] = Query(None, description="KDJ Sell 阈值"),
+    rsi_buy: Optional[float] = Query(None, description="RSI Buy 阈值"),
+    rsi_sell: Optional[float] = Query(None, description="RSI Sell 阈值"),
+    optimize: bool = Query(False, description="是否自动调优触发阈值"),
+    trigger: str = Query("macd", pattern="^(macd|kdj|rsi|obv)$", description="调优触发器"),
+    transaction_window: int = Query(7, ge=1, le=365, description="交易窗口天数"),
+) -> StockIndicatorsResponse:
+    """
+    获取股票技术指标
+
+    获取指定股票的历史 K 线并按 Excel "300 Plot" 逻辑计算技术指标。
+
+    Args:
+        stock_code: 股票代码
+        period: K 线周期 (daily/weekly/monthly)
+        days: 获取天数（指标需要较长窗口，默认 365）
+        其余: 可选阈值覆盖
+
+    Returns:
+        StockIndicatorsResponse: 技术指标数据
+    """
+    try:
+        service = StockService()
+        # Fetch extra history so long-window indicators (SMA200 needs 200 points)
+        # are computed for the entire visible range, not just the tail.
+        # Ensure we fetch at least 400 days (200 for SMA200 + 200 display buffer)
+        # regardless of the requested display days.
+        warmup_days = max(days + 200, 400)
+        result = service.get_history_data(
+            stock_code=stock_code,
+            period=period,
+            days=warmup_days,
+        )
+
+        from src.services.indicator_service import (
+            DEFAULT_THRESHOLDS,
+            compute_indicators,
+        )
+
+        overrides = {
+            "bol_constant": bol_constant,
+            "macd_buy": macd_buy,
+            "macd_sell": macd_sell,
+            "kdj_buy": kdj_buy,
+            "kdj_sell": kdj_sell,
+            "rsi_buy": rsi_buy,
+            "rsi_sell": rsi_sell,
+        }
+        thresholds = dict(DEFAULT_THRESHOLDS)
+        for key, value in overrides.items():
+            if value is not None:
+                thresholds[key] = float(value)
+
+        bars = result.get("data", [])
+        computed = compute_indicators(bars, thresholds)
+        optimization = None
+        benefit_series = []
+        if optimize and bars:
+            from src.services.indicator_optimizer import optimize_indicator_thresholds
+            optimization = optimize_indicator_thresholds(bars, trigger, transaction_window)
+            thresholds = optimization["thresholds"]
+            computed = compute_indicators(bars, thresholds)
+            benefit_series = optimization["benefit_series"]
+
+        from src.services.indicator_optimizer import calculate_trigger_benefits
+        trigger_benefits = calculate_trigger_benefits(computed, transaction_window)
+
+        if len(computed["dates"]) > days:
+            visible_start = len(computed["dates"]) - days
+        else:
+            visible_start = 0
+
+        visible_start = max(0, len(computed["dates"]) - days)
+        def trim_series(value):
+            if isinstance(value, dict):
+                return {key: trim_series(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return value[visible_start:]
+            return value
+
+        return StockIndicatorsResponse(
+            stock_code=stock_code,
+            stock_name=result.get("stock_name"),
+            period=period,
+            dates=trim_series(computed["dates"]),
+            close=trim_series(computed["close"]),
+            sma=trim_series(computed["sma"]),
+            ema=trim_series(computed["ema"]),
+            macd=trim_series(computed["macd"]),
+            macd_signal=trim_series(computed["macd_signal"]),
+            k=trim_series(computed["k"]),
+            d=trim_series(computed["d"]),
+            j=trim_series(computed["j"]),
+            rsi=trim_series(computed["rsi"]),
+            rsi6=trim_series(computed["rsi6"]),
+            rsi14=trim_series(computed["rsi14"]),
+            bolu=trim_series(computed["bolu"]),
+            bold=trim_series(computed["bold"]),
+            cci=trim_series(computed["cci"]),
+            obv=trim_series(computed["obv"]),
+            obv_ma=trim_series(computed["obv_ma"]),
+            triggers=IndicatorTriggers(**trim_series(computed["triggers"])),
+            thresholds=thresholds,
+            benefit_series=benefit_series[visible_start:] if benefit_series else [],
+            benefit_series_by_trigger={
+                key: value["benefit_series"][visible_start:]
+                for key, value in trigger_benefits.items()
+            },
+            benefit_by_trigger={
+                key: value["accumulated_benefit_pct"]
+                for key, value in trigger_benefits.items()
+            },
+            optimization=optimization,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unsupported_period",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        logger.error(f"获取技术指标失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"获取技术指标失败: {str(e)}"
+            }
+        )
