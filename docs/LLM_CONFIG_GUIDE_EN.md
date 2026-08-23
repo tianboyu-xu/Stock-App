@@ -146,7 +146,7 @@ GEMINI_API_KEY=AIzac...
 ```env
 # Ollama requires no API Key; works after running ollama serve locally
 OLLAMA_API_BASE=http://localhost:11434
-LITELLM_MODEL=ollama/qwen3:8b
+LITELLM_MODEL=ollama/qwen3.8:27b
 ```
 
 > **Important**: Ollama must be configured with `OLLAMA_API_BASE`. **Do not** use `OPENAI_BASE_URL`, or the system will concatenate URLs incorrectly (e.g. 404, `api/generate/api/show`). For remote Ollama, set `OLLAMA_API_BASE` to the actual address (e.g. `http://192.168.1.100:11434`). Current dependency constraint is `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` (matches requirements.txt).
@@ -261,10 +261,10 @@ LLM_CHANNELS=ollama
 
 # 2. Configure Ollama address (default local port 11434)
 LLM_OLLAMA_BASE_URL=http://localhost:11434
-LLM_OLLAMA_MODELS=qwen3:8b,llama3.2
+LLM_OLLAMA_MODELS=qwen3.8:27b,llama3.2
 
 # 3. Specify primary model
-LITELLM_MODEL=ollama/qwen3:8b
+LITELLM_MODEL=ollama/qwen3.8:27b
 ```
 
 ### Example: Hermes Local HTTP Generation (Phase 3)
@@ -357,9 +357,9 @@ model_list:
       api_key: "os.environ/MY_CUSTOM_SECRET_KEY"  # Fetch from environment vars for security
 
   # Ollama local model (no api_key needed)
-  - model_name: ollama/qwen3:8b
+  - model_name: ollama/qwen3.8:27b
     litellm_params:
-      model: ollama/qwen3:8b
+      model: ollama/qwen3.8:27b
       api_base: http://localhost:11434
 ```
 

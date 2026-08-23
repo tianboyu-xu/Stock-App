@@ -258,8 +258,8 @@ OPENAI_MODEL=deepseek-v4-flash
    - ❌ 错误：把 Ollama 地址填到 `OPENAI_BASE_URL`，会导致 URL 路径拼错（如 `…/api/generate/api/show`）。
 
 3. **模型名称是否加了 `ollama/` 前缀**
-   - ✅ 正确：`LITELLM_MODEL=ollama/qwen3:8b`
-   - ❌ 错误：`LITELLM_MODEL=qwen3:8b`（缺少前缀，litellm 无法路由到 Ollama）
+   - ✅ 正确：`LITELLM_MODEL=ollama/qwen3.8:27b`
+   - ❌ 错误：`LITELLM_MODEL=qwen3.8:27b`（缺少前缀，litellm 无法路由到 Ollama）
 
 4. **模型是否已下载到本地**
    ```bash

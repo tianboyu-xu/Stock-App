@@ -256,8 +256,8 @@ Work through the following 5 checkpoints in order:
    - ❌ Wrong: Putting the Ollama address in `OPENAI_BASE_URL` causes the URL path to be mangled (e.g. `…/api/generate/api/show`).
 
 3. **Does the model name include the `ollama/` prefix?**
-   - ✅ Correct: `LITELLM_MODEL=ollama/qwen3:8b`
-   - ❌ Wrong: `LITELLM_MODEL=qwen3:8b` (missing prefix — litellm cannot route to Ollama)
+   - ✅ Correct: `LITELLM_MODEL=ollama/qwen3.8:27b`
+   - ❌ Wrong: `LITELLM_MODEL=qwen3.8:27b` (missing prefix — litellm cannot route to Ollama)
 
 4. **Has the model been pulled locally?**
    ```bash

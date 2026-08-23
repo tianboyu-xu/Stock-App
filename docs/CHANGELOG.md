@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 默认 Ollama 本地模型从 `qwen3.6:35b` 切换为 `qwen3.8:27b`，同步更新 `.env.example`、配置注册表示例与相关文档。
 - [修复] 自选列表拖拽排序松手后顺序不变：补齐 `POST /api/v1/stocks/watchlist/reorder` 后端接口与 `WatchlistReorderRequest` schema，前端改为乐观更新（先本地换序、失败时回滚并提示）。
 - [改进] 自选列表行完整显示公司全称（不再截断），长名称自动换行。
 - [新功能] 侧边工作区"自选"列表支持拖拽排序：拖动行可调整自选股展示顺序，新增 `POST /api/v1/stocks/watchlist/reorder` 后端接口按请求顺序持久化 `STOCK_LIST`，未提及的现有代码自动追加到末尾。

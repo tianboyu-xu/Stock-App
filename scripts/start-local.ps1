@@ -5,7 +5,7 @@ Set-Location $repoRoot
 
 $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $envFile = Join-Path $repoRoot '.env'
-$model = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'qwen3.6:35b' }
+$model = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { 'qwen3.8:27b' }
 
 # Web service bind used to launch main.py and to open the browser.
 $hostName = '127.0.0.1'
