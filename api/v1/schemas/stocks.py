@@ -119,6 +119,43 @@ class IndicatorTriggers(BaseModel):
     rsi_sell: List[Optional[float]] = Field(default_factory=list)
     obv_buy: List[Optional[float]] = Field(default_factory=list)
     obv_sell: List[Optional[float]] = Field(default_factory=list)
+    boll_buy: List[Optional[float]] = Field(default_factory=list)
+    boll_sell: List[Optional[float]] = Field(default_factory=list)
+    cci_buy: List[Optional[float]] = Field(default_factory=list)
+    cci_sell: List[Optional[float]] = Field(default_factory=list)
+    dmi_buy: List[Optional[float]] = Field(default_factory=list)
+    dmi_sell: List[Optional[float]] = Field(default_factory=list)
+    mfi_buy: List[Optional[float]] = Field(default_factory=list)
+    mfi_sell: List[Optional[float]] = Field(default_factory=list)
+
+
+class CompositeBreakdown(BaseModel):
+    """复合评分分解（各因子得分）"""
+
+    macd: int = Field(0, description="MACD 因子得分")
+    kdj: int = Field(0, description="KDJ 因子得分")
+    rsi: int = Field(0, description="RSI 因子得分")
+    regime: int = Field(0, description="长期趋势 regime 因子得分")
+    momentum: int = Field(0, description="价格动量因子得分")
+    boll: int = Field(0, description="BOLL %B 因子得分")
+    cci: int = Field(0, description="CCI 因子得分")
+    dmi: int = Field(0, description="DMI/ADX 因子得分")
+    mfi: int = Field(0, description="MFI 因子得分")
+    volume: int = Field(0, description="成交量确认因子得分")
+    range52: int = Field(0, description="52 周位置因子得分")
+
+
+class CompositeSignals(BaseModel):
+    """复合 BUY/SELL 评分与信号"""
+
+    buy_score: List[int] = Field(default_factory=list, description="BUY 评分序列（满分 = 经典 10 分 + 启用扩展因子权重和）")
+    sell_score: List[int] = Field(default_factory=list, description="SELL 评分序列（满分 = 经典 10 分 + 启用扩展因子权重和）")
+    buy_signal: List[Optional[float]] = Field(default_factory=list, description="BUY 信号（收盘价或 null，仅在评分进入阈值区间时触发）")
+    sell_signal: List[Optional[float]] = Field(default_factory=list, description="SELL 信号（收盘价或 null，仅在评分进入阈值区间时触发）")
+    buy_breakdown: List[CompositeBreakdown] = Field(default_factory=list, description="BUY 评分分解")
+    sell_breakdown: List[CompositeBreakdown] = Field(default_factory=list, description="SELL 评分分解")
+    max_buy_score: int = Field(10, description="BUY 评分满分（默认扩展因子权重为 0 时为 10）")
+    max_sell_score: int = Field(10, description="SELL 评分满分（默认扩展因子权重为 0 时为 10）")
 
 
 class StockIndicatorsResponse(BaseModel):
@@ -145,8 +182,160 @@ class StockIndicatorsResponse(BaseModel):
     obv: List[Optional[float]] = Field(default_factory=list, description="OBV")
     obv_ma: Dict[str, List[Optional[float]]] = Field(default_factory=dict, description="OBV 均值")
     triggers: IndicatorTriggers = Field(default_factory=IndicatorTriggers, description="买卖触发器")
+    composite: Optional[CompositeSignals] = Field(None, description="复合 BUY/SELL 评分与信号")
     thresholds: Dict[str, float] = Field(default_factory=dict, description="使用的阈值")
-    benefit_series: List[Optional[float]] = Field(default_factory=list, description="累计收益率序列")
     benefit_series_by_trigger: Dict[str, List[Optional[float]]] = Field(default_factory=dict, description="各触发器累计收益率序列")
     benefit_by_trigger: Dict[str, float] = Field(default_factory=dict, description="各触发器累计收益率")
-    optimization: Optional[Dict[str, Any]] = Field(None, description="阈值调优结果")
+
+
+class AutoTuneSegmentMetrics(BaseModel):
+    """Auto Tune 单区间回测绩效"""
+
+    total_return_pct: float = Field(0.0, description="区间总收益率 (%)")
+    cagr_pct: float = Field(0.0, description="年化复合收益率 (%)")
+    after_tax_total_return_pct: float = Field(
+        0.0,
+        description="税后区间总收益率 (%)，按美国资本利得税近似（短期/长期税率按持仓时长区分）",
+    )
+    after_tax_cagr_pct: float = Field(
+        0.0,
+        description="税后年化复合收益率 (%)，按美国资本利得税近似（短期/长期税率按持仓时长区分）",
+    )
+    max_drawdown_pct: float = Field(0.0, description="最大回撤 (%)，负值")
+    sharpe: float = Field(0.0, description="年化 Sharpe 比率")
+    sortino: float = Field(0.0, description="年化 Sortino 比率")
+    profit_factor: Optional[float] = Field(None, description="盈亏比（无亏损交易时封顶 99）")
+    trades: int = Field(0, description="交易次数（一买一卖记 1 次）")
+    win_rate_pct: float = Field(0.0, description="胜率 (%)")
+    avg_trade_pct: float = Field(0.0, description="平均单笔收益 (%)")
+    avg_holding_days: float = Field(0.0, description="平均持仓交易日数")
+    exposure_pct: float = Field(0.0, description="持仓时间占比 (%)")
+    trades_per_year: float = Field(0.0, description="年均交易次数")
+
+
+class AutoTuneParams(BaseModel):
+    """Auto Tune 策略参数"""
+
+    thresholds: Dict[str, Any] = Field(default_factory=dict, description="复合评分阈值参数")
+    stop_multiple_atr: Optional[float] = Field(None, description="ATR 止损倍数（未启用为 null）")
+    trail_multiple_atr: Optional[float] = Field(None, description="ATR 移动止盈倍数（未启用为 null）")
+
+
+class AutoTuneEquitySeries(BaseModel):
+    """测试段累计收益序列（相对段首归一化为 0%）"""
+
+    dates: List[str] = Field(default_factory=list, description="交易日日期 (YYYY-MM-DD)")
+    values: List[float] = Field(default_factory=list, description="累计收益 (%)，与 dates 一一对应")
+
+
+class AutoTuneStrategyResult(BaseModel):
+    """单策略代际寻优结果"""
+
+    key: str = Field(..., description="策略标识 (A/B/C/D/E/F)")
+    name_zh: str = Field("", description="策略名称（中文）")
+    name_en: str = Field("", description="策略名称（英文）")
+    description_zh: str = Field("", description="策略说明（中文）")
+    description_en: str = Field("", description="策略说明（英文）")
+    tuned: bool = Field(False, description="是否参与参数寻优")
+    params: AutoTuneParams = Field(default_factory=AutoTuneParams)
+    metrics: Dict[str, AutoTuneSegmentMetrics] = Field(
+        default_factory=dict,
+        description="train/validation/test/train_validation 各区间绩效",
+    )
+    objectives: Dict[str, float] = Field(default_factory=dict, description="各区间目标函数得分")
+    param_robustness: Optional[float] = Field(
+        None, description="训练集最优邻域内候选的验证集达标比例（0~1）"
+    )
+    test_equity: Optional[AutoTuneEquitySeries] = Field(
+        None, description="测试段累计收益序列，供前端绘制对比曲线"
+    )
+
+
+class AutoTuneBenchmarkMetrics(BaseModel):
+    """基准在单个窗口的绩效（不可用时为 null）"""
+
+    train_validation: Optional[AutoTuneSegmentMetrics] = Field(
+        None, description="训练+验证窗口绩效"
+    )
+    test: Optional[AutoTuneSegmentMetrics] = Field(None, description="测试窗口绩效")
+
+
+class AutoTuneBenchmark(BaseModel):
+    """Auto Tune 对比基准
+
+    - stock_buy_hold：个股买入持有
+    - sp500_buy_hold：标普500 买入持有
+    - strategy_on_sp500：推荐策略买卖时点套用标普500 价格重放
+    """
+
+    key: str = Field(..., description="基准标识")
+    name_zh: str = Field("", description="基准名称（中文）")
+    name_en: str = Field("", description="基准名称（英文）")
+    description_zh: str = Field("", description="基准说明（中文）")
+    description_en: str = Field("", description="基准说明（英文）")
+    available: bool = Field(False, description="基准数据是否可用")
+    metrics: AutoTuneBenchmarkMetrics = Field(
+        default_factory=AutoTuneBenchmarkMetrics,
+        description="与策略同口径的 训练+验证 / 测试 窗口绩效",
+    )
+    test_equity: Optional[AutoTuneEquitySeries] = Field(
+        None, description="测试段累计收益序列，供前端绘制对比曲线"
+    )
+
+
+class AutoTuneParamDisplay(BaseModel):
+    """推荐参数展示项"""
+
+    key: str = Field(..., description="参数键名")
+    value: Any = Field(..., description="优化后取值")
+    default: Any = Field(None, description="默认取值")
+
+
+class AutoTuneRecommended(BaseModel):
+    """Auto Tune 推荐结果"""
+
+    strategy_key: str = Field(..., description="推荐策略标识")
+    reason_code: str = Field(
+        ...,
+        description="选择原因：baseline_sufficient / best_validation / simplicity_preference",
+    )
+    eps: float = Field(..., description="简洁性容忍度 EPS_SIMPLICITY")
+    thresholds: Dict[str, Any] = Field(default_factory=dict, description="可直接应用到图表的阈值参数")
+    risk: Dict[str, Optional[Any]] = Field(
+        default_factory=dict,
+        description="风控开关与 ATR 倍数（use_trend_filter/use_volume_filter/stop_multiple_atr/trail_multiple_atr）",
+    )
+    params_display: List[AutoTuneParamDisplay] = Field(
+        default_factory=list, description="按展示顺序排列的参数列表"
+    )
+
+
+class AutoTuneResponse(BaseModel):
+    """Auto Tune 参数寻优响应
+
+    方法：历史数据 → 训练集寻优 → 验证集选型 → 测试集仅报告，
+    目标函数平衡收益/回撤/Sharpe/交易质量/频率，而非单纯最大化收益。
+    """
+
+    window_days: int = Field(..., description="两次买入之间的最小间隔天数")
+    history: Dict[str, Any] = Field(..., description="实际使用的历史数据范围")
+    split: Dict[str, Any] = Field(..., description="train/validation/test 区间划分")
+    assumptions: Dict[str, Any] = Field(..., description="回测假设（执行价、成本、窗口等）")
+    fixed_parameters: Dict[str, Any] = Field(
+        ..., description="固定不参与寻优的指标周期参数及原因"
+    )
+    strategies: List[AutoTuneStrategyResult] = Field(
+        default_factory=list, description="A/B/C/D 四代策略对比结果"
+    )
+    benchmarks: List[AutoTuneBenchmark] = Field(
+        default_factory=list,
+        description=(
+            "对比基准（个股买入持有 / 标普500 买入持有 / 推荐策略时点套用标普500），"
+            "税后口径与策略一致"
+        ),
+    )
+    recommended: AutoTuneRecommended = Field(..., description="最终推荐参数")
+    fine_tune: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Fine Tune 滑动窗口扫描结果（未启用时为 None）"
+    )

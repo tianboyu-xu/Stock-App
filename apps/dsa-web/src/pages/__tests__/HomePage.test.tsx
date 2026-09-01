@@ -299,6 +299,16 @@ describe('HomePage', () => {
         kdjSell: 70,
         rsiBuy: 10,
         rsiSell: 70,
+        compositeBuyThreshold: 6,
+        compositeSellThreshold: 6,
+        macdLookback: 120,
+        macdLowPercentile: 15,
+        macdHighPercentile: 85,
+        rsiLow: 15,
+        rsiHigh: 85,
+        kdjLow: 40,
+        kdjHigh: 70,
+        trendPeriod: 200,
       },
     });
   });

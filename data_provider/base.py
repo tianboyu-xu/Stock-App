@@ -67,6 +67,111 @@ def summarize_exception(exc: Exception) -> Tuple[str, str]:
     return error_type, " ".join(message.split())
 
 
+# 常见美股公司名称 -> 股票代码 别名映射。
+# 用于把用户输入的常见公司名（如 APPLE）解析为真实 ticker（AAPL）。
+# 仅收录“名称本身不是合法 ticker”的条目，避免覆盖真实存在的代码。
+US_SYMBOL_ALIASES: Dict[str, str] = {
+    "APPLE": "AAPL",
+    "MICROSOFT": "MSFT",
+    "GOOGLE": "GOOGL",
+    "ALPHABET": "GOOGL",
+    "AMAZON": "AMZN",
+    "TESLA": "TSLA",
+    "NVIDIA": "NVDA",
+    "NETFLIX": "NFLX",
+    "FACEBOOK": "META",
+    "INTEL": "INTC",
+    "CISCO": "CSCO",
+    "ORACLE": "ORCL",
+    "ADOBE": "ADBE",
+    "QUALCOMM": "QCOM",
+    "HP": "HPQ",
+    "NIKE": "NKE",
+    "PEPSI": "PEP",
+    "MERCK": "MRK",
+    "EXXON": "XOM",
+    "SHELL": "SHEL",
+    "DELTA": "DAL",
+    "FEDEX": "FDX",
+    "LOWES": "LOW",
+    "GAP": "GPS",
+    "HONDA": "HMC",
+    "DEERE": "DE",
+    "ZOOM": "ZM",
+    "BAIDU": "BIDU",
+    "XPENG": "XPEV",
+    "LUCID": "LCID",
+    "BLOCK": "XYZ",
+    "CHASE": "JPM",
+    "AMEX": "AXP",
+    "ALIBABA": "BABA",
+    "BILIBILI": "BILI",
+    "RIVIAN": "RIVN",
+    "SHOPIFY": "SHOP",
+    "AIRBNB": "ABNB",
+    "COINBASE": "COIN",
+    "PALANTIR": "PLTR",
+    "SNOWFLAKE": "SNOW",
+    "ROBINHOOD": "HOOD",
+    "SPOTIFY": "SPOT",
+    "SALESFORCE": "CRM",
+    "WORKDAY": "WDAY",
+    "SERVICENOW": "NOW",
+    "AUTODESK": "ADSK",
+    "INTUIT": "INTU",
+    "TWILIO": "TWLO",
+    "DROPBOX": "DBX",
+    "PINTEREST": "PINS",
+    "MASTERCARD": "MA",
+    "GOLDMAN": "GS",
+    "JPMORGAN": "JPM",
+    "CITIGROUP": "C",
+    "UNITEDHEALTH": "UNH",
+    "PROCTER": "PG",
+    "COLGATE": "CL",
+    "HONEYWELL": "HON",
+    "CATERPILLAR": "CAT",
+    "LOCKHEED": "LMT",
+    "NORTHROP": "NOC",
+    "RAYTHEON": "RTX",
+    "SOUTHWEST": "LUV",
+    "NORFOLK": "NSC",
+    "LULULEMON": "LULU",
+    "BOEING": "BA",
+    "DISNEY": "DIS",
+    "WALMART": "WMT",
+    "COSTCO": "COST",
+    "TARGET": "TGT",
+    "STARBUCKS": "SBUX",
+    "MCDONALDS": "MCD",
+    "COCACOLA": "KO",
+    "TOYOTA": "TM",
+    "PFIZER": "PFE",
+    "ABBOTT": "ABT",
+    "CHEVRON": "CVX",
+    "CONOCOPHILLIPS": "COP",
+    "DUPONT": "DD",
+    "GENERALELECTRIC": "GE",
+    "GENERALMOTORS": "GM",
+    "HOMEDEPOT": "HD",
+    "WALTDISNEY": "DIS",
+    "AMERICANEXPRESS": "AXP",
+    "GOLDMANSACHS": "GS",
+    "MORGANSTANLEY": "MS",
+    "BANKOFAMERICA": "BAC",
+    "WELLSFARGO": "WFC",
+    "JOHNSONJOHNSON": "JNJ",
+    "PROCTERGAMBLE": "PG",
+    "UNITEDAIRLINES": "UAL",
+    "AMERICANAIRLINES": "AAL",
+    "DELTAAIRLINES": "DAL",
+    "SOUTHWESTAIRLINES": "LUV",
+    "TSMC": "TSM",
+    "NETEASE": "NTES",
+    "PINDDUODUO": "PDD",
+}
+
+
 def normalize_stock_code(stock_code: str) -> str:
     """
     Normalize stock code by stripping exchange prefixes/suffixes.
@@ -91,12 +196,18 @@ def normalize_stock_code(stock_code: str) -> str:
     - '2330.TW'     -> '2330.TW'  (keep Taiwan TWSE Yahoo suffix form)
     - '6505.TWO'    -> '6505.TWO' (keep Taiwan TPEx Yahoo suffix form)
     - 'AAPL'        -> 'AAPL'     (keep US stock ticker as-is)
+    - 'APPLE'       -> 'AAPL'     (resolve well-known company name to ticker)
 
     This function is applied at the DataProviderManager layer so that
     all individual fetchers receive a clean 6-digit code (for A-shares/ETFs).
     """
     code = stock_code.strip()
     upper = code.upper()
+
+    # 常见公司名 -> ticker 别名解析（如 APPLE -> AAPL），兼容 .US 后缀
+    alias_key = upper[:-3] if upper.endswith(".US") else upper
+    if alias_key in US_SYMBOL_ALIASES:
+        return US_SYMBOL_ALIASES[alias_key]
 
     # Normalize HK prefix to a canonical 5-digit form (e.g. hk1810 -> HK01810)
     if upper.startswith('HK') and not upper.startswith('HK.'):
@@ -617,6 +728,7 @@ class DataFetcherManager:
 
     _DAILY_MARKET_FETCHER_SUPPORT = {
         "EfinanceFetcher": {"cn"},
+        "SinaFetcher": {"cn"},
         "TencentFetcher": {"cn"},
         "AkshareFetcher": {"cn", "hk"},
         "TushareFetcher": {"cn", "hk"},
@@ -1149,6 +1261,7 @@ class DataFetcherManager:
         - 未配置的可选数据源不实例化，避免在批量拉取时反复探测无效源
         - 默认优先级：
           0. EfinanceFetcher (Priority 0) - 最高优先级
+          1. SinaFetcher (Priority 1) - Sina Finance DailyK，快速可靠的 A 股兜底
           1. AkshareFetcher (Priority 1)
           2. PytdxFetcher (Priority 2) - 通达信
           3. BaostockFetcher (Priority 3)
@@ -1158,6 +1271,7 @@ class DataFetcherManager:
         from src.config import get_config
         from .efinance_fetcher import EfinanceFetcher
         from .tencent_fetcher import TencentFetcher
+        from .sina_fetcher import SinaFetcher
         from .akshare_fetcher import AkshareFetcher
         from .tushare_fetcher import TushareFetcher
         from .tickflow_fetcher import TickFlowFetcher
@@ -1168,6 +1282,7 @@ class DataFetcherManager:
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
+        sina = SinaFetcher()
         tencent = TencentFetcher()
         akshare = AkshareFetcher()
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
@@ -1219,6 +1334,7 @@ class DataFetcherManager:
         with self._fetchers_lock:
             self._fetchers = [
                 efinance,
+                sina,
                 akshare,
                 pytdx,
                 baostock,

@@ -6,9 +6,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from src.analyzer import GeminiAnalyzer
+if TYPE_CHECKING:
+    from src.analyzer import GeminiAnalyzer
 from src.config import (
     ANSPIRE_LLM_BASE_URL_DEFAULT,
     ANSPIRE_LLM_MODEL_DEFAULT,
@@ -186,11 +187,14 @@ class GenerationBackendStatusService:
         *,
         effective_map: Dict[str, str],
         validation_issues: Optional[List[Dict[str, Any]]] = None,
-        analyzer_factory: Optional[Callable[[Config], GeminiAnalyzer]] = None,
+        analyzer_factory: Optional[Callable[[Config], "GeminiAnalyzer"]] = None,
     ) -> None:
         self._effective_map = {str(k).upper(): "" if v is None else str(v) for k, v in effective_map.items()}
         self._validation_issues = list(validation_issues or [])
-        self._analyzer_factory = analyzer_factory or (lambda config: GeminiAnalyzer(config=config))
+        # Importing the analyzer eagerly imports LiteLLM and its provider modules.  The
+        # status endpoint is deliberately cheap, so defer that work until a user runs
+        # the explicit smoke test (which is also how an Ollama model is activated).
+        self._analyzer_factory = analyzer_factory
 
     def get_status(self) -> Dict[str, Any]:
         config = self._build_backend_config()
@@ -384,7 +388,12 @@ class GenerationBackendStatusService:
         preflight_error = self._cheap_check_error(request.backend_id, config)
         if preflight_error is not None:
             raise preflight_error
-        analyzer = self._analyzer_factory(config)
+        if self._analyzer_factory is None:
+            from src.analyzer import GeminiAnalyzer
+
+            analyzer = GeminiAnalyzer(config=config)
+        else:
+            analyzer = self._analyzer_factory(config)
         prompt = self._JSON_SMOKE_PROMPT if request.mode == "json" else self._TEXT_SMOKE_PROMPT
         result = analyzer._get_generation_backend(request.backend_id).generate(
             prompt,

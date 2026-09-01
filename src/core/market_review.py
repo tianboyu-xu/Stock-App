@@ -15,15 +15,13 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 import uuid
 
 from src.config import get_config
 from src.notification import NotificationService
-from src.market_analyzer import MarketAnalyzer
 from src.report_language import normalize_report_language
 from src.search_service import SearchService
-from src.analyzer import AnalysisResult, GeminiAnalyzer
 from src.llm.generation_backend import GenerationError
 from src.services.run_diagnostics import (
     current_diagnostic_snapshot,
@@ -35,6 +33,9 @@ from src.utils.market_review_region import (
     MARKET_REVIEW_REGION_ORDER,
     normalize_market_review_region_lenient,
 )
+
+if TYPE_CHECKING:
+    from src.analyzer import GeminiAnalyzer
 
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,10 @@ def run_market_review(
     )
 
     try:
+        # A market review is requested work.  Keeping this import here avoids
+        # pulling the LLM analyzer into API startup through Market Light routes.
+        from src.market_analyzer import MarketAnalyzer
+
         if len(run_markets) > 1:
             # 多市场顺序执行，合并报告
             parts = []
@@ -790,6 +795,7 @@ def _persist_market_review_history(
 ) -> int:
     """Persist market review output into the existing analysis history table."""
     try:
+        from src.analyzer import AnalysisResult
         from src.storage import DatabaseManager
 
         report_language = normalize_report_language(getattr(config, "report_language", "zh"))

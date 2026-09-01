@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 延迟加载 AI 分析器依赖；Ollama 仅在 AI 设置中手动激活时加载模型，缩短应用启动时间。
+
+- [改进] 技术指标图阈值设置区重排：触发阈值与复合评分阈值拆为同一卡片内两个带标题分区，复合评分阈值按"评分触发 / MACD 极值 / 反转与趋势"三组展示并以分隔线区隔，重新加载按钮移至卡片底部右侧；Auto Tune 运行参数（窗口/历史/测试段/Fine Tune/预设）拆分到独立卡片。
+- [改进] Auto Tune 进度条升级为真实进度展示：运行时显示当前阶段（获取历史数据 / 四代策略寻优 / Fine Tune 窗口扫描 i/N）、完成百分比、已用时长与预计剩余时长；前端按参数组合（历史年数、测试段年数、Fine Tune 窗口、训练段裁剪）记录上次实际耗时并加权校准下次估计，越用越准。
+- [改进] 技术指标图布局调整：历史区间按钮从卡片标题行移至与触发显示（Triggers）同一行；Auto Tune 训练段范围双端滑杆默认展开；Fine Tune 各窗口明细表默认折叠（OOS CAGR 柱状图仍直接展示），点击"各窗口明细"标题可展开/收起。
+- [修复] 修复新增美股公司名代码（如 APPLE）无法加载价格历史的问题：`normalize_stock_code` 新增公司名→代码别名映射（约 100 个常见美股公司名，如 APPLE→AAPL、MICROSOFT→MSFT、GOOGLE→GOOGL），行情获取、股票名称解析、自选股校验与配置解析统一经别名归一化，已存入自选股的公司名代码无需重新添加即可正常显示行情。
+- [新功能] Auto Tune 新增 Fine Tune 滑动窗口扫描：可选启用 Fine Tune，指定训练窗口天数（默认 360D，最小 60D），系统在训练段内以该窗口长度、窗口 1/5 为步长滑动，每个位置独立执行完整四代策略寻优，比较各样本外 CAGR，返回最优窗口位置及对应参数；结果面板新增 Fine Tune 扫描柱状图（各窗口位置 OOS CAGR 对比）与详细表格（训练范围、最佳策略、CAGR、Sharpe、Max DD、交易数）；Fine Tune 设置随 Auto Tune 结果和方案一起持久化保存/加载。
+- [改进] Auto Tune 交互优化：新增运行进度条动画（Auto Tune 执行时在按钮下方显示滑动进度条）；OOS 测试段默认时长从 5 年调整为 3 年（前端默认值与后端 API/optimizer 默认值同步）；训练段滑杆默认收起，点击标题栏可展开/折叠；Fine Tune 天数输入框支持完全清空后重新输入（失焦时自动校正为 60–3000 范围内有效值）。
+- [修复] 修复多年历史请求被前端默认超时中断的问题：技术指标接口（2–5 年价格图）此前使用 axios 默认 30s 超时，数据源降级重试（如 Eastmoney 不可达后回退 baostock）实测需 ~130s 导致 2 年及以上价格图加载失败，现放宽至 180s；Auto Tune 接口超时从 180s 放宽至 300s（个股与标普500 基准两次串行取数在数据源降级时各需 ~130s），修复 20 年 Auto Tune 加载失败。
+- [新功能] 新增 SinaFetcher 数据源，使用 Sina Finance DailyK API 作为 A 股快速兜底（~1s 响应，无需 API Key，独立于东方财富后端），优先级 P1，Efinance/Akshare 不可达时自动降级触发。
+- [改进] Auto Tune 结果持久化：切换股票或刷新页面后自动恢复上次 Auto Tune 结果、选中策略和参数设置；每个股票独立记忆最后一次 Composite score 阈值（已有）与 Auto Tune 结果（新增）；新增方案保存/加载/删除功能——可将当前 Auto Tune 配置与结果命名保存为方案，通过下拉列表快速加载，点击 × 删除。
+- [新功能] 技术指标图与 Auto Tune 历史范围扩展：价格图区间新增 2/3/4/5 年选项（指标接口 `days` 上限提升至 1825）；Auto Tune 历史长度上限从 10 年放宽到 20 年（`years` 上限 20）；新增测试段长度下拉选择（1–5 年，默认 5 年，后端 `test_years` 参数，超长时自动截断并保证训练+验证段最小规模）；新增训练段双端滑杆，可按日期裁剪训练段起点/终点（验证段位置不变，裁剪过小时报错提示），结果面板同步展示实际生效的测试段年数。
+- [改进] Auto Tune 结果面板交互升级：移除"Trigger benefit %"图；策略表支持鼠标点击与键盘（Enter/Space 选中、↑/↓ 切换）选择任意代际，参数展示随选中策略实时更新；"应用到图表"改为"应用选中到图表"（主按钮样式）并新增"恢复默认阈值"按钮；测试段累计收益对比折线图新增悬停十字线与数值提示框、图例显示各曲线期末收益、选中代际曲线加粗高亮；修复"推荐策略时点 × 标普500"基准测试段永远为空的问题（改为推荐参数在个股测试段独立回测后重放标普500）；指标接口新增 `kdj_low`/`kdj_high` 查询参数，使寻优后的 KDJ 阈值也能真实作用于图表。
+- [新功能] Auto Tune 新增三个同窗口基准对比并计入美国资本利得税：标普500 买入持有、个股买入持有、推荐策略买卖时点套用标普500 价格重放；结果表新增"税后 CAGR"列，税率按持仓时长区分——持有满一年按长期税率 15%、不足一年按普通所得边际税率 35%（家庭应税收入约 40 万美元档），对每笔正收益计税、亏损不抵扣，仅用于展示对比、不构成税务建议；标普500 数据缺失时对应基准自动标记为不可用。
+- [新功能] 技术指标图新增 Auto Tune 参数寻优：基于多年日线历史（默认 10 年）对复合评分阈值（RSI/KDJ/MACD 百分位、趋势周期、BUY/SELL 评分阈值等）做多代际寻优——基线 / 趋势过滤 / ATR 风控 / 归一化评分四代策略对比，训练/验证/测试三段划分，按样本外风险调整收益与参数稳健性推荐最简稳健代际；交易默认每 90 天窗口最多一次买入（可调），推荐参数可一键应用到图表指标面板。
+- [测试] 新增 Auto Tune 结果面板组件测试：覆盖结果表与图例期末收益、悬停提示框、键盘选择策略、应用选中参数与恢复默认阈值。
+- [改进] 指标接口移除旧单触发器调优入口：`GET /api/v1/stocks/{code}/indicators` 删除 `optimize`/`trigger` 查询参数及 `optimization`/`benefit_series` 响应字段，新增 `GET /api/v1/stocks/{code}/auto-tune` 返回多代际回测对比与推荐参数。
+- [改进] 复合 BUY/SELL 评分指标按参考实现重构：价格动量因子改为衡量动量改善/恶化（近 5 根涨跌幅 ROC 的环比变化超过最小阈值即得 ±2 分，`momentum_min_change_pct` 默认 0.25），且要求当日收盘价同向确认（改善且上涨才计 BUY 分、恶化且下跌才计 SELL 分），替代原 MACD 柱动量，长期趋势 regime 因子买卖对称（价格相对趋势均线与均线方向各 ±1 分），BUY/SELL 满分统一为 10；信号仅在评分"进入"阈值区间的那根 bar 触发（默认阈值从 5 调整为 6），同一根 bar 买卖同时进入区间时视为方向不明、不产生标记；MACD 百分位窗口改为不含当前 bar 且要求完整回看窗口，窗口不足时不计分；KDJ 金叉/死叉判定与 RSV 平均价处理对齐参考实现；API 阈值参数更名为 `macd_low_percentile`/`macd_high_percentile`/`rsi_low`/`rsi_high`/`trend_period`，评分分解键 `trend` 更名为 `regime` 并新增 `max_buy_score`/`max_sell_score` 字段，Web 端同步更新。
+- [改进] 主页技术指标图 MACD/OBV/KDJ/RSI 触发标记默认关闭，每只股票默认仅显示复合 BUY/SELL 评分信号，旧触发器可手动开启。
+- [新功能] 技术指标图新增复合 BUY/SELL 评分：融合 MACD/KDJ/RSI/趋势/动量五个因子，BUY 满分 9、SELL 满分 8，评分达到可配置阈值（默认 5）时在价格图上以 ▲BUY n / ▼SELL n 标记；MACD 采用滚动窗口（默认 120 根）百分位归一化，不依赖全历史极值；新增评分面板（BUY Score: x/9、SELL Score: y/8）与可展开的因子明细（MACD/KDJ/RSI/Trend/Momentum 逐项得分），复合 BUY/SELL 标记支持与既有触发器一致的显示开关，所有阈值可在面板中编辑。
+- [修复] 主页内联技术指标图不再绘制 BOLL 上下轨线，仅保留 BOLL 中轨线与轨道区域填充，减少价格图线条遮挡。
+- [改进] 主页技术指标图 BOLL 轨道区域填充透明度从 0.3 降至 0.1，与价格图背景对比更柔和。
+- [改进] Windows 一键启动脚本改为隐藏窗口方式启动 Ollama serve，启动后只保留一个应用控制台窗口。
+- [修复] Windows 一键启动脚本（`scripts/start-local.ps1`）在 Ollama 未运行时因 `ollama --version` 输出 "could not connect" 警告行导致版本解析崩溃、首次运行无法启动的问题；Ollama 缺失或启动失败时改为警告并继续启动 Web 服务，模型拉取失败也不再中断整个启动流程。
 - [改进] 默认 Ollama 本地模型从 `qwen3.6:35b` 切换为 `qwen3.8:27b`，同步更新 `.env.example`、配置注册表示例与相关文档。
 - [修复] 自选列表拖拽排序松手后顺序不变：补齐 `POST /api/v1/stocks/watchlist/reorder` 后端接口与 `WatchlistReorderRequest` schema，前端改为乐观更新（先本地换序、失败时回滚并提示）。
 - [改进] 自选列表行完整显示公司全称（不再截断），长名称自动换行。
@@ -71,6 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] FAQ 补充 macOS 桌面应用被 Gatekeeper quarantine 阻止启动时的受信任安装包临时放行步骤（refs #2113）。
 - [新功能] LLM 渠道新增显式 Chat Completions / Responses API Surface，支持 Anspire GPT-5.6 系列等 Responses-only 模型，并统一连接测试、主分析、筛选、图片识别与状态诊断路由；所有运行路径先按同一规则解析协议再校验 Surface，混合 Surface 的同名路由按未知能力保守处理；显式 Anspire 渠道独占共享 Key，非法 Surface 或协议不匹配时不会把该 Key 回退为旧版 Chat 部署，同时保留无关的 Gemini/OpenAI 等 legacy provider；本地 loopback 渠道可在图片识别路径继续无 Key 调用，远端渠道仍要求凭据；禁用渠道不会因残留 Surface 配置阻断其他兼容 fallback；Web 编辑器不会静默改写非法历史值，并允许将 Hermes 非法 Surface 修复为 Chat Completions。
 - [修复] 将 Responses 渠道的协议、模型 provider、公开 route alias 与 wire-model 构造收敛为统一路由契约，保存校验、运行时加载、状态诊断、选股入口和 Web 编辑器共同使用当前安装的 LiteLLM provider registry，拒绝 `openai` 协议下显式非 OpenAI provider 的模型、拒绝同一 alias 混用 Chat/Responses，并保留 OpenAI-compatible 网关自有的带斜杠模型 ID。
+- [新功能] Auto Tune 触发策略扩展为多因子：新增 BOLL %B、CCI、DMI/ADX、MFI、成交量确认与 52 周位置六类扩展因子（全部由现有日线 OHLCV 计算，不引入新数据源），复合评分按权重并入（默认权重 0，经典四代 A–D 信号逐位不变），新增代际 E「多因子评分」与 F「多因子 + 风控」；技术指标图新增 BOLL/CCI/DMI/MFI 触发组（标记/图例/开关）、扩展因子阈值面板与双语明细标签，指标接口新增 16 个阈值查询参数，详见 docs/auto-tune-strategy.md。
+- [文档] 新增 docs/auto-tune-strategy.md：扩展因子定义、触发规则、代际 E/F、权重语义、阈值默认值与免费外部数据源评估结论。
 
 ## [3.29.0] - 2026-08-02
 

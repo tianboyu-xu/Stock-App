@@ -43,6 +43,32 @@ describe('LLMChannelEditor', () => {
     { key: 'LITELLM_MODEL', value: 'openai/gpt-4o-mini' },
   ];
 
+  it('labels the explicit Ollama model request as activation', async () => {
+    testLLMChannel.mockResolvedValue({ success: true });
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'ollama' },
+          { key: 'LLM_OLLAMA_PROTOCOL', value: 'ollama' },
+          { key: 'LLM_OLLAMA_BASE_URL', value: 'http://localhost:11434' },
+          { key: 'LLM_OLLAMA_ENABLED', value: 'true' },
+          { key: 'LLM_OLLAMA_MODELS', value: 'qwen3:8b' },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Ollama/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '激活 Ollama' }));
+
+    await waitFor(() => expect(testLLMChannel).toHaveBeenCalledWith(expect.objectContaining({
+      protocol: 'ollama',
+      models: ['qwen3:8b'],
+    })));
+  });
+
   function lastDraftCall(onDraftItemsChange: ReturnType<typeof vi.fn>) {
     const calls = onDraftItemsChange.mock.calls;
     return calls[calls.length - 1]?.[0] || [];

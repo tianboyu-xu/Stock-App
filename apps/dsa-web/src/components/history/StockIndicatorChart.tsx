@@ -1,35 +1,102 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { stocksApi, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
+import { stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
+import type { UiTextKey } from '../../i18n/uiText';
 import { Button, Card } from '../common';
 import { DashboardStateBlock } from '../dashboard';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 
-const DAY_OPTIONS = [7, 14, 30, 60, 90, 180, 365];
-type TuningTrigger = 'macd' | 'kdj' | 'rsi' | 'obv';
-const BENEFIT_COLORS: Record<string, string> = {
-  macd: '#38bdf8',
-  kdj: '#f59e0b',
-  rsi: '#a78bfa',
-  obv: '#22c55e',
+const DAY_OPTIONS = [7, 14, 30, 60, 90, 180, 365, 730, 1095, 1460, 1825];
+const AUTO_TUNE_TEST_YEAR_OPTIONS = [1, 2, 3, 4, 5];
+// 双端滑杆使用 0~1000 的千分比刻度，两端最小间隔约 2%，避免贴合成一个点。
+const TRAIN_RANGE_SCALE = 1000;
+const TRAIN_RANGE_MIN_GAP = 20;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const parseDayMs = (value: string) => new Date(`${value}T00:00:00Z`).getTime();
+const formatDayMs = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+// Auto Tune strategy / benchmark line colors for the cumulative-profit plot.
+const AUTO_TUNE_STRATEGY_COLORS: Record<string, string> = {
+  A: '#2f7de1',
+  B: '#22c55e',
+  C: '#f59e0b',
+  D: '#a78bfa',
+  E: '#f97316',
+  F: '#06b6d4',
+};
+const AUTO_TUNE_BENCHMARK_COLORS: Record<string, string> = {
+  sp500_buy_hold: '#ef4444',
+  stock_buy_hold: '#94a3b8',
+  strategy_on_sp500: '#14b8a6',
 };
 
 const PLOT_HEIGHT = 340;
 const PADDING = { top: 16, right: 60, bottom: 40, left: 12 };
 const DATE_TICK_COUNT = 5;
 
-type TriggerGroupKey = 'macd' | 'obv' | 'kdj' | 'rsi';
+type TriggerGroupKey =
+  | 'macd'
+  | 'obv'
+  | 'kdj'
+  | 'rsi'
+  | 'boll'
+  | 'cci'
+  | 'dmi'
+  | 'mfi'
+  | 'compositeBuy'
+  | 'compositeSell';
 
-const TRIGGER_GROUPS: Array<{ key: TriggerGroupKey; label: string }> = [
+const TRIGGER_GROUPS: Array<{
+  key: TriggerGroupKey;
+  label: string;
+  labelKey?: 'priceHistory.compositeBuy' | 'priceHistory.compositeSell';
+}> = [
+  { key: 'compositeBuy', label: 'BUY', labelKey: 'priceHistory.compositeBuy' },
+  { key: 'compositeSell', label: 'SELL', labelKey: 'priceHistory.compositeSell' },
   { key: 'macd', label: 'MACD' },
   { key: 'obv', label: 'OBV' },
   { key: 'kdj', label: 'KDJ' },
   { key: 'rsi', label: 'RSI' },
+  { key: 'boll', label: 'BOLL' },
+  { key: 'cci', label: 'CCI' },
+  { key: 'dmi', label: 'DMI' },
+  { key: 'mfi', label: 'MFI' },
+];
+
+// Colors and shapes for the extension-factor trigger groups (BOLL/CCI/DMI/MFI).
+const EXTRA_GROUP_STYLES: Record<
+  'boll' | 'cci' | 'dmi' | 'mfi',
+  { buyColor: string; sellColor: string; buyShape: 'circle' | 'square' | 'triangleUp' | 'cross'; sellShape: 'circle' | 'square' | 'triangleDown' | 'cross' }
+> = {
+  boll: { buyColor: '#a78bfa', sellColor: '#7c3aed', buyShape: 'circle', sellShape: 'circle' },
+  cci: { buyColor: '#fbbf24', sellColor: '#d97706', buyShape: 'square', sellShape: 'square' },
+  dmi: { buyColor: '#2dd4bf', sellColor: '#0d9488', buyShape: 'triangleUp', sellShape: 'triangleDown' },
+  mfi: { buyColor: '#f472b6', sellColor: '#db2777', buyShape: 'cross', sellShape: 'cross' },
+};
+
+// Composite score breakdown factor keys, rendered in display order with
+// bilingual labels (classic factors first, extension factors after).
+const COMPOSITE_FACTOR_ROWS: Array<{ key: keyof CompositeBreakdown; labelKey: string }> = [
+  { key: 'macd', labelKey: 'priceHistory.factor.macd' },
+  { key: 'kdj', labelKey: 'priceHistory.factor.kdj' },
+  { key: 'rsi', labelKey: 'priceHistory.factor.rsi' },
+  { key: 'regime', labelKey: 'priceHistory.factor.regime' },
+  { key: 'momentum', labelKey: 'priceHistory.factor.momentum' },
+  { key: 'boll', labelKey: 'priceHistory.factor.boll' },
+  { key: 'cci', labelKey: 'priceHistory.factor.cci' },
+  { key: 'dmi', labelKey: 'priceHistory.factor.dmi' },
+  { key: 'mfi', labelKey: 'priceHistory.factor.mfi' },
+  { key: 'volume', labelKey: 'priceHistory.factor.volume' },
+  { key: 'range52', labelKey: 'priceHistory.factor.range52' },
 ];
 
 // Series colors matching the reference image.
 const COLOR_CLOSE = '#2f7de1';
 const COLOR_SMA200 = '#d62728';
+// Bollinger Bands (BOLL): solid upper/lower/mid lines, light-blue band fill.
+const COLOR_BOLL = '#c084fc';
+const COLOR_BOLL_FILL = '#87ceeb';
 
 // Rainbow gradient: shorter SMA → redder, longer SMA → bluer.
 // Keys: 5, 10, 20, 30, 40, 60, 120
@@ -59,6 +126,58 @@ const SELL = '#d62728';
 // Per-stock threshold persistence (localStorage).
 const THRESHOLD_STORAGE_PREFIX = 'dsa.indicator.thresholds.';
 
+// Defaults mirror src/services/indicator_service.py DEFAULT_THRESHOLDS.
+const DEFAULT_THRESHOLDS: IndicatorThresholds = {
+  bolConstant: 0.1,
+  macdBuy: 0.7,
+  macdSell: 0.99,
+  kdjBuy: 40,
+  kdjSell: 70,
+  rsiBuy: 10,
+  rsiSell: 70,
+  compositeBuyThreshold: 6,
+  compositeSellThreshold: 6,
+  macdLookback: 120,
+  macdLowPercentile: 15,
+  macdHighPercentile: 85,
+  rsiLow: 15,
+  rsiHigh: 85,
+  kdjLow: 40,
+  kdjHigh: 70,
+  trendPeriod: 200,
+  bollBuyLevel: 0.1,
+  bollSellLevel: 0.9,
+  bollWeight: 0,
+  cciBuyLevel: -100,
+  cciSellLevel: 100,
+  cciWeight: 0,
+  adxMinLevel: 20,
+  dmiWeight: 0,
+  mfiBuyLevel: 20,
+  mfiSellLevel: 80,
+  mfiWeight: 0,
+  volumeConfirmLevel: 1.5,
+  volumeWeight: 0,
+  range52HighLevel: 0.95,
+  range52LowLevel: 1.05,
+  range52Weight: 0,
+};
+
+// Fill any missing keys with defaults so older stored/backend threshold
+// payloads (7 keys) keep working with the composite thresholds.
+function normalizeThresholds(partial: Partial<IndicatorThresholds> | null | undefined): IndicatorThresholds {
+  const merged: IndicatorThresholds = { ...DEFAULT_THRESHOLDS };
+  if (partial) {
+    for (const key of Object.keys(DEFAULT_THRESHOLDS) as Array<keyof IndicatorThresholds>) {
+      const value = partial[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        merged[key] = value;
+      }
+    }
+  }
+  return merged;
+}
+
 function thresholdStorageKey(stockCode: string): string {
   return `${THRESHOLD_STORAGE_PREFIX}${stockCode.trim().toUpperCase()}`;
 }
@@ -82,7 +201,7 @@ function readStoredThresholds(stockCode: string): IndicatorThresholds | null {
         return null;
       }
     }
-    return parsed as IndicatorThresholds;
+    return normalizeThresholds(parsed);
   } catch {
     return null;
   }
@@ -99,6 +218,135 @@ function writeStoredThresholds(stockCode: string, thresholds: IndicatorThreshold
   }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-tune result & preset persistence (localStorage, per-stock).
+// ---------------------------------------------------------------------------
+const AUTOTUNE_STORAGE_PREFIX = 'dsa.autotune.';
+const AUTOTUNE_PRESETS_STORAGE_KEY = 'dsa.autotune.presets';
+
+interface AutoTunePreset {
+  id: string;
+  name: string;
+  timestamp: number;
+  result: AutoTuneResponse;
+  selectedStrategyKey: string | null;
+  settings: {
+    transactionWindow: number;
+    autoTuneYears: number;
+    autoTuneTestYears: number;
+    trainRangePct: [number, number] | null;
+    fineTuneEnabled: boolean;
+    fineTuneDays: number;
+  };
+}
+
+interface StoredAutoTuneState {
+  result: AutoTuneResponse;
+  selectedStrategyKey: string | null;
+  settings: {
+    transactionWindow: number;
+    autoTuneYears: number;
+    autoTuneTestYears: number;
+    trainRangePct: [number, number] | null;
+    fineTuneEnabled: boolean;
+    fineTuneDays: number;
+  };
+}
+
+function autoTuneStorageKey(stockCode: string): string {
+  return `${AUTOTUNE_STORAGE_PREFIX}${stockCode.trim().toUpperCase()}`;
+}
+
+function readStoredAutoTune(stockCode: string): StoredAutoTuneState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(autoTuneStorageKey(stockCode));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredAutoTuneState;
+    if (parsed?.result?.strategies && Array.isArray(parsed.result.strategies)) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredAutoTune(stockCode: string, state: StoredAutoTuneState): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(autoTuneStorageKey(stockCode), JSON.stringify(state));
+  } catch {
+    // best-effort
+  }
+}
+
+function readStoredPresets(): AutoTunePreset[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(AUTOTUNE_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredPresets(presets: AutoTunePreset[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(AUTOTUNE_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+  } catch {
+    // best-effort
+  }
+}
+
+// --- Auto Tune duration calibration ---------------------------------------
+// The backend runs the whole optimization in a single request, so the
+// progress bar estimates completion from elapsed time. Durations observed
+// on previous runs (per parameter signature) are stored to make the
+// estimate increasingly accurate.
+const AUTOTUNE_DURATION_STORAGE_KEY = 'dsa.autotune.durations';
+
+function readStoredDurations(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(AUTOTUNE_DURATION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function recordAutoTuneDuration(signature: string, durationMs: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const map = readStoredDurations();
+    const prev = map[signature];
+    map[signature] = prev == null ? Math.round(durationMs) : Math.round(prev * 0.4 + durationMs * 0.6);
+    window.localStorage.setItem(AUTOTUNE_DURATION_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // best-effort
+  }
+}
+
+function estimateAutoTuneDuration(
+  years: number,
+  testYears: number,
+  fineTuneWindows: number,
+  clippedRatio: number,
+): number {
+  const fetchMs = 8000;
+  const trainYears = Math.max(1, (years - testYears) * clippedRatio);
+  const optimizeMs = 5000 + trainYears * 2200;
+  // Sweep windows cover ~the full train span with step = window/5, so total
+  // sweep cost is roughly a few times a single full-train optimization.
+  const fineTuneMs = fineTuneWindows > 0 ? optimizeMs * Math.min(6, fineTuneWindows) * 0.8 : 0;
+  return Math.round(fetchMs + optimizeMs + fineTuneMs);
+}
+
 interface ThresholdField {
   key: keyof IndicatorThresholds;
   labelKey:
@@ -108,7 +356,31 @@ interface ThresholdField {
     | 'priceHistory.thresholdKdjBuy'
     | 'priceHistory.thresholdKdjSell'
     | 'priceHistory.thresholdRsiBuy'
-    | 'priceHistory.thresholdRsiSell';
+    | 'priceHistory.thresholdRsiSell'
+    | 'priceHistory.thresholdCompositeBuy'
+    | 'priceHistory.thresholdCompositeSell'
+    | 'priceHistory.thresholdMacdLookback'
+    | 'priceHistory.thresholdMacdLowPercentile'
+    | 'priceHistory.thresholdMacdHighPercentile'
+    | 'priceHistory.thresholdRsiLow'
+    | 'priceHistory.thresholdRsiHigh'
+    | 'priceHistory.thresholdTrendPeriod'
+    | 'priceHistory.thresholdBollBuyLevel'
+    | 'priceHistory.thresholdBollSellLevel'
+    | 'priceHistory.thresholdBollWeight'
+    | 'priceHistory.thresholdCciBuyLevel'
+    | 'priceHistory.thresholdCciSellLevel'
+    | 'priceHistory.thresholdCciWeight'
+    | 'priceHistory.thresholdAdxMinLevel'
+    | 'priceHistory.thresholdDmiWeight'
+    | 'priceHistory.thresholdMfiBuyLevel'
+    | 'priceHistory.thresholdMfiSellLevel'
+    | 'priceHistory.thresholdMfiWeight'
+    | 'priceHistory.thresholdVolumeConfirmLevel'
+    | 'priceHistory.thresholdVolumeWeight'
+    | 'priceHistory.thresholdRange52HighLevel'
+    | 'priceHistory.thresholdRange52LowLevel'
+    | 'priceHistory.thresholdRange52Weight';
 }
 
 const THRESHOLD_FIELDS: ThresholdField[] = [
@@ -120,6 +392,176 @@ const THRESHOLD_FIELDS: ThresholdField[] = [
   { key: 'rsiBuy', labelKey: 'priceHistory.thresholdRsiBuy' },
   { key: 'rsiSell', labelKey: 'priceHistory.thresholdRsiSell' },
 ];
+
+// Composite score thresholds grouped by role, so the UI renders them as visual clusters.
+const COMPOSITE_SCORE_FIELDS: ThresholdField[] = [
+  { key: 'compositeBuyThreshold', labelKey: 'priceHistory.thresholdCompositeBuy' },
+  { key: 'compositeSellThreshold', labelKey: 'priceHistory.thresholdCompositeSell' },
+];
+
+const COMPOSITE_MACD_FIELDS: ThresholdField[] = [
+  { key: 'macdLookback', labelKey: 'priceHistory.thresholdMacdLookback' },
+  { key: 'macdLowPercentile', labelKey: 'priceHistory.thresholdMacdLowPercentile' },
+  { key: 'macdHighPercentile', labelKey: 'priceHistory.thresholdMacdHighPercentile' },
+];
+
+const COMPOSITE_REGIME_FIELDS: ThresholdField[] = [
+  { key: 'rsiLow', labelKey: 'priceHistory.thresholdRsiLow' },
+  { key: 'rsiHigh', labelKey: 'priceHistory.thresholdRsiHigh' },
+  { key: 'trendPeriod', labelKey: 'priceHistory.thresholdTrendPeriod' },
+];
+
+// Extension-factor thresholds (BOLL %B / CCI / DMI / MFI / volume / 52-week range).
+// Weights are integer points; 0 disables the factor in the composite score.
+const EXTRA_FACTOR_FIELDS: ThresholdField[] = [
+  { key: 'bollBuyLevel', labelKey: 'priceHistory.thresholdBollBuyLevel' },
+  { key: 'bollSellLevel', labelKey: 'priceHistory.thresholdBollSellLevel' },
+  { key: 'bollWeight', labelKey: 'priceHistory.thresholdBollWeight' },
+  { key: 'cciBuyLevel', labelKey: 'priceHistory.thresholdCciBuyLevel' },
+  { key: 'cciSellLevel', labelKey: 'priceHistory.thresholdCciSellLevel' },
+  { key: 'cciWeight', labelKey: 'priceHistory.thresholdCciWeight' },
+  { key: 'adxMinLevel', labelKey: 'priceHistory.thresholdAdxMinLevel' },
+  { key: 'dmiWeight', labelKey: 'priceHistory.thresholdDmiWeight' },
+  { key: 'mfiBuyLevel', labelKey: 'priceHistory.thresholdMfiBuyLevel' },
+  { key: 'mfiSellLevel', labelKey: 'priceHistory.thresholdMfiSellLevel' },
+  { key: 'mfiWeight', labelKey: 'priceHistory.thresholdMfiWeight' },
+  { key: 'volumeConfirmLevel', labelKey: 'priceHistory.thresholdVolumeConfirmLevel' },
+  { key: 'volumeWeight', labelKey: 'priceHistory.thresholdVolumeWeight' },
+  { key: 'range52HighLevel', labelKey: 'priceHistory.thresholdRange52HighLevel' },
+  { key: 'range52LowLevel', labelKey: 'priceHistory.thresholdRange52LowLevel' },
+  { key: 'range52Weight', labelKey: 'priceHistory.thresholdRange52Weight' },
+];
+
+function ThresholdFieldInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: ThresholdField;
+  value: number | undefined;
+  onChange: (key: keyof IndicatorThresholds, raw: string) => void;
+}) {
+  const { t } = useUiLanguage();
+  return (
+    <label className="flex flex-col gap-1 text-xs text-secondary-text">
+      <span>{t(field.labelKey)}</span>
+      <input
+        type="number"
+        step="any"
+        value={value ?? ''}
+        onChange={(event) => onChange(field.key, event.target.value)}
+        className="w-20 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground focus:border-primary/50 focus:outline-none"
+      />
+    </label>
+  );
+}
+
+// Auto Tune 推荐参数的展示标签（key 为后端 snake_case 参数名）。
+const AUTO_TUNE_PARAM_LABEL_KEYS: Record<string, string> = {
+  composite_buy_threshold: 'priceHistory.autoTune.param.compositeBuyThreshold',
+  composite_sell_threshold: 'priceHistory.autoTune.param.compositeSellThreshold',
+  rsi_low: 'priceHistory.autoTune.param.rsiLow',
+  rsi_high: 'priceHistory.autoTune.param.rsiHigh',
+  kdj_low: 'priceHistory.autoTune.param.kdjLow',
+  kdj_high: 'priceHistory.autoTune.param.kdjHigh',
+  macd_lookback: 'priceHistory.autoTune.param.macdLookback',
+  macd_low_percentile: 'priceHistory.autoTune.param.macdLowPercentile',
+  macd_high_percentile: 'priceHistory.autoTune.param.macdHighPercentile',
+  trend_period: 'priceHistory.autoTune.param.trendPeriod',
+  stop_multiple_atr: 'priceHistory.autoTune.param.stopAtr',
+  trail_multiple_atr: 'priceHistory.autoTune.param.trailAtr',
+  boll_buy_level: 'priceHistory.autoTune.param.bollBuyLevel',
+  boll_sell_level: 'priceHistory.autoTune.param.bollSellLevel',
+  boll_weight: 'priceHistory.autoTune.param.bollWeight',
+  cci_buy_level: 'priceHistory.autoTune.param.cciBuyLevel',
+  cci_sell_level: 'priceHistory.autoTune.param.cciSellLevel',
+  cci_weight: 'priceHistory.autoTune.param.cciWeight',
+  adx_min_level: 'priceHistory.autoTune.param.adxMinLevel',
+  dmi_weight: 'priceHistory.autoTune.param.dmiWeight',
+  mfi_buy_level: 'priceHistory.autoTune.param.mfiBuyLevel',
+  mfi_sell_level: 'priceHistory.autoTune.param.mfiSellLevel',
+  mfi_weight: 'priceHistory.autoTune.param.mfiWeight',
+  volume_confirm_level: 'priceHistory.autoTune.param.volumeConfirmLevel',
+  volume_weight: 'priceHistory.autoTune.param.volumeWeight',
+  range52_high_level: 'priceHistory.autoTune.param.range52HighLevel',
+  range52_low_level: 'priceHistory.autoTune.param.range52LowLevel',
+  range52_weight: 'priceHistory.autoTune.param.range52Weight',
+};
+
+// Display order for the selected strategy's tuned parameters.
+const AUTO_TUNE_PARAM_ORDER = [
+  'composite_buy_threshold',
+  'composite_sell_threshold',
+  'rsi_low',
+  'rsi_high',
+  'kdj_low',
+  'kdj_high',
+  'macd_lookback',
+  'macd_low_percentile',
+  'macd_high_percentile',
+  'trend_period',
+  'stop_multiple_atr',
+  'trail_multiple_atr',
+  'boll_buy_level',
+  'boll_sell_level',
+  'boll_weight',
+  'cci_buy_level',
+  'cci_sell_level',
+  'cci_weight',
+  'adx_min_level',
+  'dmi_weight',
+  'mfi_buy_level',
+  'mfi_sell_level',
+  'mfi_weight',
+  'volume_confirm_level',
+  'volume_weight',
+  'range52_high_level',
+  'range52_low_level',
+  'range52_weight',
+];
+
+// Map Auto Tune threshold param keys to chart IndicatorThresholds keys,
+// so the default value can be shown next to each tuned parameter.
+const AUTO_TUNE_PARAM_THRESHOLD_KEYS: Record<string, keyof IndicatorThresholds> = {
+  composite_buy_threshold: 'compositeBuyThreshold',
+  composite_sell_threshold: 'compositeSellThreshold',
+  rsi_low: 'rsiLow',
+  rsi_high: 'rsiHigh',
+  kdj_low: 'kdjLow',
+  kdj_high: 'kdjHigh',
+  macd_lookback: 'macdLookback',
+  macd_low_percentile: 'macdLowPercentile',
+  macd_high_percentile: 'macdHighPercentile',
+  trend_period: 'trendPeriod',
+  boll_buy_level: 'bollBuyLevel',
+  boll_sell_level: 'bollSellLevel',
+  boll_weight: 'bollWeight',
+  cci_buy_level: 'cciBuyLevel',
+  cci_sell_level: 'cciSellLevel',
+  cci_weight: 'cciWeight',
+  adx_min_level: 'adxMinLevel',
+  dmi_weight: 'dmiWeight',
+  mfi_buy_level: 'mfiBuyLevel',
+  mfi_sell_level: 'mfiSellLevel',
+  mfi_weight: 'mfiWeight',
+  volume_confirm_level: 'volumeConfirmLevel',
+  volume_weight: 'volumeWeight',
+  range52_high_level: 'range52HighLevel',
+  range52_low_level: 'range52LowLevel',
+  range52_weight: 'range52Weight',
+};
+
+const AUTO_TUNE_REASON_KEYS: Record<string, string> = {
+  baseline_sufficient: 'priceHistory.autoTune.reason.baseline_sufficient',
+  best_validation: 'priceHistory.autoTune.reason.best_validation',
+  simplicity_preference: 'priceHistory.autoTune.reason.simplicity_preference',
+};
+
+const formatAutoTuneValue = (value: number | null | undefined): string =>
+  typeof value === 'number' && Number.isFinite(value) ? String(value) : '--';
+
+const formatEquityPct = (value: number): string =>
+  `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
 
 const formatPrice = (value?: number | null): string =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '--';
@@ -154,42 +596,6 @@ const buildSmoothLinePath = (
   return d;
 };
 
-// Smooth spline path closed down to a baseline, for area fills.
-const buildSmoothAreaPath = (
-  values: Array<number | null>,
-  x: (i: number) => number,
-  y: (v: number) => number,
-  baselineY: number,
-): string => {
-  const points: Array<{ px: number; py: number }> = [];
-  for (let i = 0; i < values.length; i += 1) {
-    const v = values[i];
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      points.push({ px: x(i), py: y(v) });
-    }
-  }
-  if (points.length === 0) return '';
-  if (points.length === 1) {
-    return `M ${points[0].px} ${points[0].py} L ${points[0].px} ${baselineY} L ${points[0].px} ${points[0].py} Z`;
-  }
-  let d = `M ${points[0].px} ${points[0].py}`;
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const p0 = points[Math.max(0, i - 1)];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[Math.min(points.length - 1, i + 2)];
-    const c1x = p1.px + (p2.px - p0.px) / 6;
-    const c1y = p1.py + (p2.py - p0.py) / 6;
-    const c2x = p2.px - (p3.px - p1.px) / 6;
-    const c2y = p2.py - (p3.py - p1.py) / 6;
-    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.px} ${p2.py}`;
-  }
-  const first = points[0];
-  const last = points[points.length - 1];
-  d += ` L ${last.px} ${baselineY} L ${first.px} ${baselineY} Z`;
-  return d;
-};
-
 interface LinePath {
   d: string;
   color: string;
@@ -218,6 +624,75 @@ const buildLinePath = (
   return d;
 };
 
+// Bollinger middle band = (BOLU + BOLD) / 2, where both bands are finite.
+const buildBollMidPath = (
+  bolu: Array<number | null>,
+  bold: Array<number | null>,
+  x: (i: number) => number,
+  y: (v: number) => number,
+): string => {
+  let d = '';
+  let started = false;
+  for (let i = 0; i < bolu.length; i += 1) {
+    const upper = bolu[i];
+    const lower = bold[i];
+    if (
+      typeof upper !== 'number' || !Number.isFinite(upper)
+      || typeof lower !== 'number' || !Number.isFinite(lower)
+    ) {
+      started = false;
+      continue;
+    }
+    const px = x(i);
+    const py = y((upper + lower) / 2);
+    d += started ? ` L ${px} ${py}` : `M ${px} ${py}`;
+    started = true;
+  }
+  return d;
+};
+
+// Closed band between two series (e.g. BOLL upper/lower) for area fills.
+// Emits one closed subpath per contiguous run of finite points.
+const buildBandPath = (
+  upper: Array<number | null>,
+  lower: Array<number | null>,
+  x: (i: number) => number,
+  y: (v: number) => number,
+): string => {
+  let d = '';
+  let segment: Array<{ ux: number; uy: number; lx: number; ly: number }> = [];
+  const flush = () => {
+    if (segment.length === 0) return;
+    const first = segment[0];
+    const last = segment[segment.length - 1];
+    let path = `M ${first.ux} ${first.uy}`;
+    for (let i = 1; i < segment.length; i += 1) {
+      path += ` L ${segment[i].ux} ${segment[i].uy}`;
+    }
+    path += ` L ${last.lx} ${last.ly}`;
+    for (let i = segment.length - 2; i >= 0; i -= 1) {
+      path += ` L ${segment[i].lx} ${segment[i].ly}`;
+    }
+    path += ' Z';
+    d += (d ? ' ' : '') + path;
+    segment = [];
+  };
+  for (let i = 0; i < upper.length; i += 1) {
+    const u = upper[i];
+    const l = lower[i];
+    if (
+      typeof u !== 'number' || !Number.isFinite(u)
+      || typeof l !== 'number' || !Number.isFinite(l)
+    ) {
+      flush();
+      continue;
+    }
+    segment.push({ ux: x(i), uy: y(u), lx: x(i), ly: y(l) });
+  }
+  flush();
+  return d;
+};
+
 interface Marker {
   index: number;
   value: number;
@@ -234,31 +709,126 @@ const collectMarkers = (series: Array<number | null>): Marker[] => {
   return out;
 };
 
+// ---------------------------------------------------------------------------
+// Fine Tune sweep chart: simple bar chart of OOS CAGR by window position.
+// ---------------------------------------------------------------------------
+interface FineTuneSweepChartProps {
+  sweep: FineTuneSweepPosition[];
+  bestIndex: number;
+}
+
+function FineTuneSweepChart({ sweep, bestIndex }: FineTuneSweepChartProps) {
+  if (!sweep.length) return null;
+  const WIDTH = 600;
+  const HEIGHT = 120;
+  const PAD = { top: 10, right: 50, bottom: 24, left: 10 };
+  const plotW = WIDTH - PAD.left - PAD.right;
+  const plotH = HEIGHT - PAD.top - PAD.bottom;
+  const barW = Math.max(6, Math.min(30, plotW / sweep.length - 2));
+  const gap = (plotW - barW * sweep.length) / Math.max(sweep.length - 1, 1);
+  const cagrs = sweep.map((p) => p.testCagr);
+  const maxVal = Math.max(...cagrs, 1);
+  const minVal = Math.min(...cagrs, 0);
+  const range = maxVal - minVal || 1;
+  const zeroY = PAD.top + (maxVal / range) * plotH;
+  const yScale = (v: number) => PAD.top + ((maxVal - v) / range) * plotH;
+
+  return (
+    <svg width={WIDTH} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="block w-full" style={{ maxWidth: WIDTH }}>
+      {/* Zero line */}
+      <line x1={PAD.left} x2={WIDTH - PAD.right} y1={zeroY} y2={zeroY} stroke="var(--border)" strokeOpacity="0.5" />
+      {/* Bars */}
+      {sweep.map((pos, i) => {
+        const x = PAD.left + i * (barW + gap);
+        const val = pos.testCagr;
+        const barTop = val >= 0 ? yScale(val) : zeroY;
+        const barH = Math.abs(yScale(val) - zeroY);
+        const isBest = pos.positionIndex === bestIndex;
+        return (
+          <g key={pos.positionIndex}>
+            <rect
+              x={x}
+              y={barTop}
+              width={barW}
+              height={Math.max(barH, 1)}
+              rx={2}
+              fill={isBest ? 'var(--color-primary, #22c55e)' : val >= 0 ? '#4ade80' : '#f87171'}
+              opacity={isBest ? '1' : '0.65'}
+            />
+            {/* Value label */}
+            <text
+              x={x + barW / 2}
+              y={val >= 0 ? barTop - 3 : barTop + barH + 10}
+              fontSize="9"
+              fill={isBest ? '#ffffff' : '#9ca3af'}
+              textAnchor="middle"
+              fontWeight={isBest ? 'bold' : 'normal'}
+            >
+              {val.toFixed(1)}%
+            </text>
+            {/* Position label */}
+            <text x={x + barW / 2} y={HEIGHT - 4} fontSize="8" fill="#6b7280" textAnchor="middle">
+              {pos.positionIndex + 1}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 export interface StockIndicatorChartProps {
   stockCode: string;
   stockName?: string;
 }
 
 export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockCode, stockName }) => {
-  const { t } = useUiLanguage();
+  const { t, language } = useUiLanguage();
   const [days, setDays] = useState(180);
   const [thresholds, setThresholds] = useState<IndicatorThresholds | null>(null);
   const [result, setResult] = useState<StockIndicatorsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const [tuningTrigger, setTuningTrigger] = useState<TuningTrigger>('macd');
   const [transactionWindow, setTransactionWindow] = useState(90);
+  const [autoTuneYears, setAutoTuneYears] = useState(10);
+  const [autoTuneTestYears, setAutoTuneTestYears] = useState(3);
+  const [fineTuneEnabled, setFineTuneEnabled] = useState(false);
+  const [fineTuneDays, setFineTuneDays] = useState(360);
+  const [fineTuneDaysRaw, setFineTuneDaysRaw] = useState('360');
+  const [trainRangePct, setTrainRangePct] = useState<[number, number] | null>(null);
   const [isTuning, setIsTuning] = useState(false);
+  const [trainRangeExpanded, setTrainRangeExpanded] = useState(true);
+  const [fineTuneTableExpanded, setFineTuneTableExpanded] = useState(false);
+  const [tuneProgress, setTuneProgress] = useState<{
+    startMs: number;
+    estimateMs: number;
+    fineTuneWindows: number;
+  } | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
+  const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResponse | null>(null);
+  const [selectedStrategyKey, setSelectedStrategyKey] = useState<string | null>(null);
+  const [equityHoverIndex, setEquityHoverIndex] = useState<number | null>(null);
+  const [autoTuneError, setAutoTuneError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<AutoTunePreset[]>([]);
+  const [presetNameInput, setPresetNameInput] = useState('');
+  const [showPresetInput, setShowPresetInput] = useState(false);
   const requestSeqRef = useRef(0);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [visibleTriggers, setVisibleTriggers] = useState<Record<TriggerGroupKey, boolean>>({
-    macd: true,
-    obv: true,
-    kdj: true,
-    rsi: true,
+    macd: false,
+    obv: false,
+    kdj: false,
+    rsi: false,
+    boll: false,
+    cci: false,
+    dmi: false,
+    mfi: false,
+    compositeBuy: true,
+    compositeSell: true,
   });
+  const [showCompositeDebug, setShowCompositeDebug] = useState(false);
 
   // Keep the chart sized to its container so the lines fit the current window.
   // The measured div only renders after data loads, so re-run once isLoading
@@ -293,7 +863,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
         if (seq !== requestSeqRef.current) return;
         setResult(response);
         if (!th) {
-          setThresholds(response.thresholds);
+          setThresholds(normalizeThresholds(response.thresholds));
         }
       } catch (err) {
         if (seq !== requestSeqRef.current) return;
@@ -311,6 +881,28 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     void load(days, stored);
   }, [load, days, stockCode]);
 
+  // Load saved auto-tune results and presets on mount / stock change.
+  useEffect(() => {
+    setPresets(readStoredPresets());
+    const saved = readStoredAutoTune(stockCode);
+    if (saved) {
+      setAutoTuneResult(saved.result);
+      setSelectedStrategyKey(saved.selectedStrategyKey);
+      setTransactionWindow(saved.settings.transactionWindow);
+      setAutoTuneYears(saved.settings.autoTuneYears);
+      setAutoTuneTestYears(saved.settings.autoTuneTestYears ?? 3);
+      setFineTuneEnabled(saved.settings.fineTuneEnabled ?? false);
+      setFineTuneDays(saved.settings.fineTuneDays ?? 360);
+      setFineTuneDaysRaw(String(saved.settings.fineTuneDays ?? 360));
+      setTrainRangePct(saved.settings.trainRangePct);
+    } else {
+      setAutoTuneResult(null);
+      setSelectedStrategyKey(null);
+    }
+    setEquityHoverIndex(null);
+    setAutoTuneError(null);
+  }, [stockCode]);
+
   const handleThresholdChange = useCallback((key: keyof IndicatorThresholds, raw: string) => {
     const parsed = Number(raw);
     setThresholds((prev) => {
@@ -324,26 +916,355 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     });
   }, [days, load, stockCode]);
 
-  const applyThresholds = useCallback(() => {
-    void load(days, thresholds);
-  }, [load, days, thresholds]);
+  // 训练段滑杆的可用区间：历史起点 ~ 验证段开始前一日（验证/测试位置不受裁剪影响）。
+  const trainDomain = useMemo(() => {
+    if (!autoTuneResult) return null;
+    const validationStart = autoTuneResult.split.validation?.startDate;
+    if (!validationStart) return null;
+    const startMs = parseDayMs(autoTuneResult.history.startDate);
+    const endMs = parseDayMs(validationStart) - DAY_MS;
+    if (!(endMs > startMs)) return null;
+    return { startMs, endMs };
+  }, [autoTuneResult]);
 
-  const tuneThresholds = useCallback(async () => {
+  const trainRangeDates = useMemo(() => {
+    if (!trainDomain) return null;
+    const [lo, hi] = trainRangePct ?? [0, TRAIN_RANGE_SCALE];
+    const span = trainDomain.endMs - trainDomain.startMs;
+    return {
+      start: formatDayMs(trainDomain.startMs + Math.round((lo / TRAIN_RANGE_SCALE) * span)),
+      end: formatDayMs(trainDomain.startMs + Math.round((hi / TRAIN_RANGE_SCALE) * span)),
+    };
+  }, [trainDomain, trainRangePct]);
+
+  // 历史/测试段长度变化会改变可训练区间，旧的裁剪范围不再有意义。
+  useEffect(() => {
+    setTrainRangePct(null);
+  }, [autoTuneYears, autoTuneTestYears, stockCode]);
+
+  const handleTrainRangeChange = useCallback((which: 'start' | 'end', raw: number) => {
+    setTrainRangePct((prev) => {
+      const [lo, hi] = prev ?? [0, TRAIN_RANGE_SCALE];
+      if (which === 'start') {
+        return [Math.min(Math.max(0, raw), hi - TRAIN_RANGE_MIN_GAP), hi];
+      }
+      return [lo, Math.max(Math.min(TRAIN_RANGE_SCALE, raw), lo + TRAIN_RANGE_MIN_GAP)];
+    });
+  }, []);
+
+  const runAutoTune = useCallback(async () => {
     setIsTuning(true);
+    setAutoTuneError(null);
+    const clipped =
+      trainRangePct != null && (trainRangePct[0] !== 0 || trainRangePct[1] !== TRAIN_RANGE_SCALE);
+    const fineTuneWindows =
+      fineTuneEnabled && fineTuneDays > 0
+        ? Math.max(1, Math.floor(((autoTuneYears - autoTuneTestYears) * 365 - fineTuneDays) / Math.max(1, Math.floor(fineTuneDays / 5))) + 1)
+        : 0;
+    const durationSignature = `${autoTuneYears}|${autoTuneTestYears}|${fineTuneWindows}|${clipped ? 'clipped' : 'full'}`;
+    const calibratedMs = readStoredDurations()[durationSignature];
+    const estimateMs = calibratedMs ?? estimateAutoTuneDuration(autoTuneYears, autoTuneTestYears, fineTuneWindows, clipped ? 0.7 : 1);
+    const startedAt = Date.now();
+    setTuneProgress({ startMs: startedAt, estimateMs, fineTuneWindows });
     try {
-      const response = await stocksApi.getIndicators(stockCode, {
-        period: 'daily', days, optimize: true, trigger: tuningTrigger, transactionWindow,
+      const response = await stocksApi.autoTune(stockCode, {
+        windowDays: transactionWindow,
+        years: autoTuneYears,
+        testYears: autoTuneTestYears,
+        ...(clipped && trainRangeDates
+          ? { trainStartDate: trainRangeDates.start, trainEndDate: trainRangeDates.end }
+          : {}),
+        ...(fineTuneEnabled && fineTuneDays > 0
+          ? { fineTuneWindowDays: fineTuneDays }
+          : {}),
       });
-      setResult(response);
-      setThresholds(response.thresholds);
-      writeStoredThresholds(stockCode, response.thresholds);
+      recordAutoTuneDuration(durationSignature, Date.now() - startedAt);
+      setAutoTuneResult(response);
+      setSelectedStrategyKey(null);
+      setEquityHoverIndex(null);
+      // Persist results so they survive stock switch / page reload.
+      writeStoredAutoTune(stockCode, {
+        result: response,
+        selectedStrategyKey: null,
+        settings: {
+          transactionWindow,
+          autoTuneYears,
+          autoTuneTestYears,
+          trainRangePct: clipped ? trainRangePct : null,
+          fineTuneEnabled,
+          fineTuneDays,
+        },
+      });
+    } catch (err) {
+      setAutoTuneResult(null);
+      setAutoTuneError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsTuning(false);
+      setTuneProgress(null);
     }
-  }, [days, stockCode, transactionWindow, tuningTrigger]);
+  }, [autoTuneTestYears, autoTuneYears, stockCode, transactionWindow, trainRangeDates, trainRangePct, fineTuneEnabled, fineTuneDays]);
+
+  // Tick while tuning so the progress bar/elapsed time re-renders.
+  useEffect(() => {
+    if (!tuneProgress) return;
+    const id = window.setInterval(() => setProgressTick((v) => v + 1), 250);
+    return () => window.clearInterval(id);
+  }, [tuneProgress]);
+
+  const tuneProgressInfo = useMemo(() => {
+    if (!tuneProgress) return null;
+    void progressTick;
+    const elapsedMs = Date.now() - tuneProgress.startMs;
+    const frac = Math.min(0.97, elapsedMs / Math.max(1000, tuneProgress.estimateMs));
+    const fetchEnd = 0.12;
+    const optimizeEnd = tuneProgress.fineTuneWindows > 0 ? 0.55 : 0.99;
+    let stage: 'fetching' | 'optimizing' | 'fineTuning' = 'fetching';
+    if (frac >= optimizeEnd) {
+      stage = 'fineTuning';
+    } else if (frac >= fetchEnd) {
+      stage = 'optimizing';
+    }
+    let fineTuneCurrent = 0;
+    if (stage === 'fineTuning' && tuneProgress.fineTuneWindows > 0) {
+      const ftFrac = (frac - optimizeEnd) / Math.max(0.01, 0.99 - optimizeEnd);
+      fineTuneCurrent = Math.min(tuneProgress.fineTuneWindows, Math.floor(ftFrac * tuneProgress.fineTuneWindows) + 1);
+    }
+    return {
+      percent: Math.max(1, Math.round(frac * 100)),
+      stage,
+      fineTuneCurrent,
+      fineTuneTotal: tuneProgress.fineTuneWindows,
+      elapsedSeconds: Math.floor(elapsedMs / 1000),
+      etaSeconds: Math.max(0, Math.ceil((tuneProgress.estimateMs - elapsedMs) / 1000)),
+    };
+  }, [tuneProgress, progressTick]);
+
+  // Persist selected strategy key whenever it changes (after user clicks a row).
+  useEffect(() => {
+    if (!autoTuneResult) return;
+    const saved = readStoredAutoTune(stockCode);
+    if (saved) {
+      writeStoredAutoTune(stockCode, { ...saved, selectedStrategyKey });
+    }
+  }, [selectedStrategyKey, autoTuneResult, stockCode]);
+
+  const applyAutoTunedThresholds = useCallback(() => {
+    if (!autoTuneResult) return;
+    const selectedKey = selectedStrategyKey ?? autoTuneResult.recommended.strategyKey;
+    const selected = autoTuneResult.strategies.find((strategy) => strategy.key === selectedKey);
+    if (!selected) return;
+    const next = normalizeThresholds({
+      ...(thresholds ?? {}),
+      ...selected.params.thresholds,
+    });
+    setThresholds(next);
+    writeStoredThresholds(stockCode, next);
+    void load(days, next);
+  }, [autoTuneResult, days, load, selectedStrategyKey, stockCode, thresholds]);
+
+  const restoreDefaultThresholds = useCallback(() => {
+    const next: IndicatorThresholds = { ...DEFAULT_THRESHOLDS };
+    setThresholds(next);
+    writeStoredThresholds(stockCode, next);
+    void load(days, next);
+  }, [days, load, stockCode]);
+
+  // --- Preset management ---------------------------------------------------
+  const savePreset = useCallback(() => {
+    if (!autoTuneResult || !presetNameInput.trim()) return;
+    const preset: AutoTunePreset = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: presetNameInput.trim(),
+      timestamp: Date.now(),
+      result: autoTuneResult,
+      selectedStrategyKey,
+      settings: {
+        transactionWindow,
+        autoTuneYears,
+        autoTuneTestYears,
+        trainRangePct,
+        fineTuneEnabled,
+        fineTuneDays,
+      },
+    };
+    const next = [...presets, preset];
+    setPresets(next);
+    writeStoredPresets(next);
+    setPresetNameInput('');
+    setShowPresetInput(false);
+  }, [autoTuneResult, presetNameInput, presets, selectedStrategyKey, transactionWindow, autoTuneYears, autoTuneTestYears, trainRangePct, fineTuneEnabled, fineTuneDays]);
+
+  const loadPreset = useCallback((preset: AutoTunePreset) => {
+    setAutoTuneResult(preset.result);
+    setSelectedStrategyKey(preset.selectedStrategyKey);
+    setTransactionWindow(preset.settings.transactionWindow);
+    setAutoTuneYears(preset.settings.autoTuneYears);
+    setAutoTuneTestYears(preset.settings.autoTuneTestYears);
+    setTrainRangePct(preset.settings.trainRangePct);
+    setFineTuneEnabled(preset.settings.fineTuneEnabled ?? false);
+    setFineTuneDays(preset.settings.fineTuneDays ?? 360);
+    setFineTuneDaysRaw(String(preset.settings.fineTuneDays ?? 360));
+    setEquityHoverIndex(null);
+    setAutoTuneError(null);
+    // Also persist as the "last" state for this stock.
+    writeStoredAutoTune(stockCode, {
+      result: preset.result,
+      selectedStrategyKey: preset.selectedStrategyKey,
+      settings: preset.settings,
+    });
+  }, [stockCode]);
+
+  const deletePreset = useCallback((presetId: string) => {
+    const next = presets.filter((p) => p.id !== presetId);
+    setPresets(next);
+    writeStoredPresets(next);
+  }, [presets]);
+
+  // Strategy rows are selectable by mouse click or keyboard
+  // (Enter/Space selects, ArrowUp/ArrowDown moves the selection).
+  const handleStrategyRowKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLTableRowElement>, index: number) => {
+      if (!autoTuneResult) return;
+      const strategies = autoTuneResult.strategies;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        setSelectedStrategyKey(strategies[index].key);
+      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        const nextIndex = Math.min(strategies.length - 1, Math.max(0, index + delta));
+        setSelectedStrategyKey(strategies[nextIndex].key);
+      }
+    },
+    [autoTuneResult],
+  );
+
+  const selectedAutoTuneKey = selectedStrategyKey
+    ?? autoTuneResult?.recommended.strategyKey
+    ?? null;
+  const selectedAutoTuneStrategy = autoTuneResult?.strategies.find(
+    (strategy) => strategy.key === selectedAutoTuneKey,
+  ) ?? null;
+
+  // Live parameter display for the currently selected strategy.
+  const selectedParamDisplay = useMemo(() => {
+    if (!selectedAutoTuneStrategy) {
+      return [] as Array<{ key: string; value: number; default: number | null }>;
+    }
+    const rows: Array<{ key: string; value: number; default: number | null }> = [];
+    for (const key of AUTO_TUNE_PARAM_ORDER) {
+      let value: number | null | undefined;
+      if (key === 'stop_multiple_atr') {
+        value = selectedAutoTuneStrategy.params.stopMultipleAtr;
+      } else if (key === 'trail_multiple_atr') {
+        value = selectedAutoTuneStrategy.params.trailMultipleAtr;
+      } else {
+        const camelKey = key.replace(/_([a-z])/g, (_match, char: string) => char.toUpperCase());
+        value = (
+          selectedAutoTuneStrategy.params.thresholds as Record<string, number | null | undefined>
+        )[camelKey];
+      }
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      const thresholdKey = AUTO_TUNE_PARAM_THRESHOLD_KEYS[key];
+      const defaultValue = thresholdKey ? DEFAULT_THRESHOLDS[thresholdKey] : null;
+      rows.push({
+        key,
+        value,
+        default: typeof defaultValue === 'number' ? defaultValue : null,
+      });
+    }
+    return rows;
+  }, [selectedAutoTuneStrategy]);
+
+  // Cumulative-profit curves over the test window for all strategies + benchmarks.
+  const autoTuneEquityPlot = useMemo(() => {
+    if (!autoTuneResult) return null;
+    const seriesList: Array<{
+      key: string;
+      label: string;
+      color: string;
+      dashed: boolean;
+      values: number[];
+    }> = [];
+    for (const strategy of autoTuneResult.strategies) {
+      if (strategy.testEquity && strategy.testEquity.values.length > 1) {
+        seriesList.push({
+          key: strategy.key,
+          label: (language === 'zh' ? strategy.nameZh : strategy.nameEn) || strategy.key,
+          color: AUTO_TUNE_STRATEGY_COLORS[strategy.key] ?? '#8884d8',
+          dashed: false,
+          values: strategy.testEquity.values,
+        });
+      }
+    }
+    for (const benchmark of autoTuneResult.benchmarks) {
+      if (benchmark.available && benchmark.testEquity && benchmark.testEquity.values.length > 1) {
+        seriesList.push({
+          key: benchmark.key,
+          label: (language === 'zh' ? benchmark.nameZh : benchmark.nameEn) || benchmark.key,
+          color: AUTO_TUNE_BENCHMARK_COLORS[benchmark.key] ?? '#94a3b8',
+          dashed: true,
+          values: benchmark.testEquity.values,
+        });
+      }
+    }
+    if (seriesList.length === 0) return null;
+
+    const allValues = seriesList.flatMap((series) => series.values);
+    let min = Math.min(0, ...allValues);
+    let max = Math.max(0, ...allValues);
+    const span = max - min || 1;
+    min -= span * 0.06;
+    max += span * 0.06;
+
+    const width = containerWidth > 0 ? containerWidth : 720;
+    const left = 12;
+    const right = 60;
+    const top = 8;
+    const plotHeight = 120;
+    const axisY = top + plotHeight + 16;
+    const x = (index: number, length: number) =>
+      left + (length > 1 ? index / (length - 1) : 0) * (width - left - right);
+    const y = (value: number) => top + ((max - value) / (max - min)) * plotHeight;
+
+    const dates = autoTuneResult.strategies.find(
+      (strategy) => strategy.testEquity && strategy.testEquity.dates.length > 0,
+    )?.testEquity?.dates ?? [];
+    const tickCount = dates.length > 1 ? Math.min(5, dates.length) : dates.length;
+    const dateTicks = Array.from({ length: tickCount }, (_unused, i) => {
+      const index = tickCount > 1
+        ? Math.round((i / (tickCount - 1)) * (dates.length - 1))
+        : 0;
+      return { x: x(index, dates.length), label: dates[index]?.slice(0, 7) ?? '' };
+    });
+
+    // Nice round horizontal gridlines between min and max.
+    const rawStep = (max - min) / 4;
+    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+    const step = Math.ceil(rawStep / magnitude) * magnitude;
+    const gridTicks: number[] = [];
+    for (let value = Math.ceil(min / step) * step; value <= max; value += step) {
+      gridTicks.push(Math.round(value * 100) / 100);
+    }
+
+    return {
+      seriesList,
+      width,
+      left,
+      right,
+      top,
+      plotWidth: width - left - right,
+      refLength: seriesList[0]?.values.length ?? dates.length,
+      dates,
+      x,
+      y,
+      dateTicks,
+      gridTicks,
+      axisY,
+    };
+  }, [autoTuneResult, containerWidth, language]);
 
   const toggleTrigger = useCallback((key: TriggerGroupKey) => {
-    setTuningTrigger(key);
     setVisibleTriggers((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
@@ -362,6 +1283,8 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       });
     };
     pushSeries(result.close);
+    pushSeries(result.bolu);
+    pushSeries(result.bold);
     SMA_DOTTED.forEach(({ key }) => pushSeries(result.sma[key]));
     pushSeries(result.sma['200']);
 
@@ -403,6 +1326,11 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   const linePaths = useMemo<LinePath[]>(() => {
     if (!result || !geometry) return [];
     const paths: LinePath[] = [];
+    // Bollinger Bands drawn beneath the SMAs / close line.
+    // Upper/lower band strokes are intentionally omitted; only the mid
+    // line and the band fill are rendered.
+    const bollMid = buildBollMidPath(result.bolu ?? [], result.bold ?? [], geometry.x, geometry.y);
+    if (bollMid) paths.push({ d: bollMid, color: COLOR_BOLL, width: 1.4 });
     for (const { key, color } of SMA_DOTTED) {
       const d = buildLinePath(result.sma[key] ?? [], geometry.x, geometry.y);
       if (d) paths.push({ d, color, width: 1.2, dashed: true });
@@ -414,17 +1342,69 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     return paths;
   }, [result, geometry]);
 
+  const bollBandPath = useMemo(() => {
+    if (!result || !geometry) return '';
+    return buildBandPath(result.bolu ?? [], result.bold ?? [], geometry.x, geometry.y);
+  }, [result, geometry]);
+
   const markers = useMemo(() => {
     if (!result) return null;
+    const collect = (series?: Array<number | null>): Marker[] => collectMarkers(series ?? []);
     return {
-      macdBuy: collectMarkers(result.triggers.macdBuy),
-      macdSell: collectMarkers(result.triggers.macdSell),
-      obvBuy: collectMarkers(result.triggers.obvBuy),
-      obvSell: collectMarkers(result.triggers.obvSell),
-      kdjBuy: collectMarkers(result.triggers.kdjBuy),
-      kdjSell: collectMarkers(result.triggers.kdjSell),
-      rsiBuy: collectMarkers(result.triggers.rsiBuy),
-      rsiSell: collectMarkers(result.triggers.rsiSell),
+      macdBuy: collect(result.triggers.macdBuy),
+      macdSell: collect(result.triggers.macdSell),
+      obvBuy: collect(result.triggers.obvBuy),
+      obvSell: collect(result.triggers.obvSell),
+      kdjBuy: collect(result.triggers.kdjBuy),
+      kdjSell: collect(result.triggers.kdjSell),
+      rsiBuy: collect(result.triggers.rsiBuy),
+      rsiSell: collect(result.triggers.rsiSell),
+      bollBuy: collect(result.triggers.bollBuy),
+      bollSell: collect(result.triggers.bollSell),
+      cciBuy: collect(result.triggers.cciBuy),
+      cciSell: collect(result.triggers.cciSell),
+      dmiBuy: collect(result.triggers.dmiBuy),
+      dmiSell: collect(result.triggers.dmiSell),
+      mfiBuy: collect(result.triggers.mfiBuy),
+      mfiSell: collect(result.triggers.mfiSell),
+    };
+  }, [result]);
+
+  const compositeMarkers = useMemo(() => {
+    const composite = result?.composite;
+    if (!composite) return null;
+    const buy: Array<{ marker: Marker; score: number }> = [];
+    const sell: Array<{ marker: Marker; score: number }> = [];
+    const buySignal = composite.buySignal ?? [];
+    const sellSignal = composite.sellSignal ?? [];
+    const buyScore = composite.buyScore ?? [];
+    const sellScore = composite.sellScore ?? [];
+    for (let i = 0; i < buySignal.length; i += 1) {
+      const v = buySignal[i];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        buy.push({ marker: { index: i, value: v }, score: buyScore[i] ?? 0 });
+      }
+    }
+    for (let i = 0; i < sellSignal.length; i += 1) {
+      const v = sellSignal[i];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        sell.push({ marker: { index: i, value: v }, score: sellScore[i] ?? 0 });
+      }
+    }
+    return { buy, sell };
+  }, [result]);
+
+  const latestComposite = useMemo(() => {
+    const composite = result?.composite;
+    if (!composite || composite.buyScore.length === 0) return null;
+    const i = composite.buyScore.length - 1;
+    return {
+      buyScore: composite.buyScore[i] ?? 0,
+      sellScore: composite.sellScore[i] ?? 0,
+      buyBreakdown: composite.buyBreakdown?.[i],
+      sellBreakdown: composite.sellBreakdown?.[i],
+      maxBuyScore: composite.maxBuyScore,
+      maxSellScore: composite.maxSellScore,
     };
   }, [result]);
 
@@ -494,8 +1474,40 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     );
   };
 
+  const renderCompositeMarker = (marker: Marker, score: number, kind: 'buy' | 'sell') => {
+    if (!geometry) return null;
+    const cx = geometry.x(marker.index);
+    const cy = geometry.y(marker.value);
+    const color = kind === 'buy' ? BUY : SELL;
+    const size = 5;
+    const key = `composite-${kind}-${marker.index}-${marker.value}`;
+    const shape = kind === 'buy' ? (
+      <polygon
+        points={`${cx},${cy - size - 2} ${cx - size - 1},${cy + size} ${cx + size + 1},${cy + size}`}
+        fill={color}
+        stroke="#fff"
+        strokeWidth={1}
+      />
+    ) : (
+      <polygon
+        points={`${cx},${cy + size + 2} ${cx - size - 1},${cy - size} ${cx + size + 1},${cy - size}`}
+        fill={color}
+        stroke="#fff"
+        strokeWidth={1}
+      />
+    );
+    return (
+      <g key={key}>
+        {shape}
+        <text x={cx + size + 2} y={cy - size - 2} fontSize="10" fill={color} fontWeight={700}>
+          {kind === 'buy' ? `BUY ${score}` : `SELL ${score}`}
+        </text>
+      </g>
+    );
+  };
+
   return (
-    <Card variant="bordered" padding="md" className="home-panel-card">
+    <Card variant="bordered" padding="md" className="home-panel-card flex flex-col">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-foreground">{t('priceHistory.indicatorTitle')}</h2>
@@ -504,24 +1516,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-secondary-text">{t('priceHistory.daysLabel')}</span>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {DAY_OPTIONS.map((value) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setDays(value)}
-                className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
-                  days === value
-                    ? 'border-primary/50 bg-primary/10 text-primary'
-                    : 'border-border/70 bg-background/50 text-secondary-text hover:bg-hover hover:text-foreground'
-                }`}
-              >
-                {value}
-                {t('priceHistory.daysSuffix')}
-              </button>
-            ))}
-          </div>
           <span className="ml-2 text-base font-semibold tabular-nums text-foreground">
             {formatPrice(latest)}
           </span>
@@ -529,37 +1523,706 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       </div>
 
       {thresholds ? (
-        <div className="mb-4 flex flex-wrap items-end gap-3 rounded-xl border border-border/60 bg-background/40 p-3">
-          <span className="text-xs font-medium text-secondary-text">{t('priceHistory.thresholds')}</span>
-          {THRESHOLD_FIELDS.map(({ key, labelKey }) => (
-            <label key={key} className="flex flex-col gap-1 text-xs text-secondary-text">
-              <span>{t(labelKey)}</span>
+        <div className="order-3">
+        <>
+        <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-secondary-text">{t('priceHistory.thresholds')}</div>
+            <Button variant="secondary" size="sm" onClick={restoreDefaultThresholds}>
+              {t('priceHistory.autoTune.restoreDefault')}
+            </Button>
+          </div>
+          <div className="mt-2 flex flex-wrap items-end gap-x-3 gap-y-2">
+            {THRESHOLD_FIELDS.map((field) => (
+              <ThresholdFieldInput
+                key={field.key}
+                field={field}
+                value={thresholds[field.key]}
+                onChange={handleThresholdChange}
+              />
+            ))}
+          </div>
+          <div className="my-3 h-px bg-border/40" aria-hidden />
+          <div className="text-xs font-medium text-secondary-text">{t('priceHistory.compositeThresholds')}</div>
+          <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+              {COMPOSITE_SCORE_FIELDS.map((field) => (
+                <ThresholdFieldInput
+                  key={field.key}
+                  field={field}
+                  value={thresholds[field.key]}
+                  onChange={handleThresholdChange}
+                />
+              ))}
+            </div>
+            <span className="hidden h-9 w-px self-center bg-border/60 sm:block" aria-hidden />
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+              {COMPOSITE_MACD_FIELDS.map((field) => (
+                <ThresholdFieldInput
+                  key={field.key}
+                  field={field}
+                  value={thresholds[field.key]}
+                  onChange={handleThresholdChange}
+                />
+              ))}
+            </div>
+            <span className="hidden h-9 w-px self-center bg-border/60 sm:block" aria-hidden />
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+              {COMPOSITE_REGIME_FIELDS.map((field) => (
+                <ThresholdFieldInput
+                  key={field.key}
+                  field={field}
+                  value={thresholds[field.key]}
+                  onChange={handleThresholdChange}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
+            <span className="text-xs font-medium text-secondary-text">{t('priceHistory.extraFactorThresholds')}</span>
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+              {EXTRA_FACTOR_FIELDS.map((field) => (
+                <ThresholdFieldInput
+                  key={field.key}
+                  field={field}
+                  value={thresholds[field.key]}
+                  onChange={handleThresholdChange}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          <div className="text-xs font-medium text-secondary-text">{t('priceHistory.autoTune.title')}</div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <label className="flex items-center gap-1 text-xs text-secondary-text">
+              <span>{t('priceHistory.autoTune.windowLabel')}</span>
+              <input type="number" min="10" max="365" value={transactionWindow} onChange={(event) => setTransactionWindow(Math.min(365, Math.max(10, Number(event.target.value) || 10)))} className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground" />
+              <span>D</span>
+            </label>
+            <label className="flex items-center gap-1 text-xs text-secondary-text">
+              <span>{t('priceHistory.autoTune.history')}</span>
+              <input type="number" min="3" max="20" value={autoTuneYears} onChange={(event) => setAutoTuneYears(Math.min(20, Math.max(3, Number(event.target.value) || 10)))} className="w-12 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground" />
+              <span>Y</span>
+            </label>
+            <label className="flex items-center gap-1 text-xs text-secondary-text">
+              <span>{t('priceHistory.autoTune.testPeriod')}</span>
+              <select
+                value={autoTuneTestYears}
+                onChange={(event) => setAutoTuneTestYears(Number(event.target.value))}
+                className="rounded-md border border-border/70 bg-card px-1.5 py-1 text-xs text-foreground"
+              >
+                {AUTO_TUNE_TEST_YEAR_OPTIONS.map((years) => (
+                  <option key={years} value={years}>
+                    {years}{t('priceHistory.yearsSuffix')}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-xs text-secondary-text">
+              <input
+                type="checkbox"
+                checked={fineTuneEnabled}
+                onChange={(e) => setFineTuneEnabled(e.target.checked)}
+                className="h-3 w-3"
+              />
+              <span>{t('priceHistory.autoTune.fineTune')}</span>
               <input
                 type="number"
-                step="any"
-                value={thresholds[key]}
-                onChange={(event) => handleThresholdChange(key, event.target.value)}
-                className="w-20 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground focus:border-primary/50 focus:outline-none"
+                min="60"
+                max="3000"
+                value={fineTuneDaysRaw}
+                disabled={!fineTuneEnabled}
+                onChange={(e) => setFineTuneDaysRaw(e.target.value)}
+                onBlur={() => {
+                  const parsed = Number(fineTuneDaysRaw);
+                  const clamped = Math.min(3000, Math.max(60, isNaN(parsed) ? 360 : parsed));
+                  setFineTuneDays(clamped);
+                  setFineTuneDaysRaw(String(clamped));
+                }}
+                className="w-14 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground disabled:opacity-40"
               />
+              <span>D</span>
             </label>
-          ))}
-          <Button variant="secondary" size="sm" onClick={applyThresholds}>
-            {t('priceHistory.retry')}
-          </Button>
-          <label className="flex items-center gap-1 text-xs text-secondary-text">
-            <span>Window</span>
-            <input type="number" min="1" max="365" value={transactionWindow} onChange={(event) => setTransactionWindow(Math.max(1, Number(event.target.value) || 1))} className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground" />
-            <span>D</span>
-          </label>
-          <Button variant="primary" size="sm" onClick={() => void tuneThresholds()} disabled={isTuning}>
-            {isTuning ? 'Tuning…' : 'Auto tune'}
-          </Button>
+            {presets.length > 0 ? (
+              <select
+                onChange={(e) => {
+                  const preset = presets.find((p) => p.id === e.target.value);
+                  if (preset) loadPreset(preset);
+                  e.target.value = '';
+                }}
+                defaultValue=""
+                className="rounded-md border border-border/70 bg-card px-1.5 py-1 text-xs text-foreground"
+              >
+                <option value="" disabled>
+                  {t('priceHistory.autoTune.presets.loadPlaceholder')}
+                </option>
+                {presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <Button variant="primary" size="sm" className="sm:ml-auto" onClick={() => void runAutoTune()} disabled={isTuning}>
+              {isTuning ? t('priceHistory.autoTune.running') : t('priceHistory.autoTune.button')}
+            </Button>
+          </div>
+        </div>
+        {isTuning && tuneProgressInfo ? (
+          <div className="mt-2">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-xs text-secondary-text">
+              <span>
+                {tuneProgressInfo.stage === 'fetching'
+                  ? t('priceHistory.autoTune.progress.fetching')
+                  : tuneProgressInfo.stage === 'optimizing'
+                    ? t('priceHistory.autoTune.progress.optimizing')
+                    : t('priceHistory.autoTune.progress.fineTuning', {
+                        current: String(tuneProgressInfo.fineTuneCurrent),
+                        total: String(tuneProgressInfo.fineTuneTotal),
+                      })}
+              </span>
+              <span className="tabular-nums">
+                {tuneProgressInfo.percent}%
+                {' · '}
+                {t('priceHistory.autoTune.progress.elapsed', { seconds: String(tuneProgressInfo.elapsedSeconds) })}
+                {' · '}
+                {t('priceHistory.autoTune.progress.eta', { seconds: String(tuneProgressInfo.etaSeconds) })}
+              </span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-border/50">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-300 ease-linear"
+                style={{ width: `${tuneProgressInfo.percent}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
+        </>
         </div>
       ) : null}
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {autoTuneResult ? (
+        <div className="order-4 mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-foreground">{t('priceHistory.autoTune.title')}</div>
+            <div className="text-xs text-secondary-text">
+              {autoTuneResult.history.bars} bars · {autoTuneResult.history.startDate} ~ {autoTuneResult.history.endDate}
+              {' · '}{t('priceHistory.autoTune.windowLabel')} {autoTuneResult.windowDays}D
+              {autoTuneResult.history.testYearsUsed != null
+                ? ` · ${t('priceHistory.autoTune.testPeriod')} ${autoTuneResult.history.testYearsUsed}${t('priceHistory.yearsSuffix')}`
+                : ''}
+              {' · '}{t('priceHistory.autoTune.costNote', { cost: String(autoTuneResult.assumptions.costPctPerSide ?? '') })}
+            </div>
+          </div>
+          <div className="mb-2 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-secondary-text">
+            {(['train', 'validation', 'test'] as const).map((segment) => {
+              const range = autoTuneResult.split[segment];
+              if (!range) return null;
+              return (
+                <span key={segment}>
+                  {t(`priceHistory.autoTune.split.${segment}` as UiTextKey)}: {range.startDate} ~ {range.endDate} ({range.bars})
+                </span>
+              );
+            })}
+          </div>
+          {trainDomain && trainRangeDates ? (
+            <div className="mb-3">
+              <button
+                type="button"
+                onClick={() => setTrainRangeExpanded((prev) => !prev)}
+                className="mb-1 flex w-full items-center justify-between text-xs text-secondary-text hover:text-foreground"
+              >
+                <span>{t('priceHistory.autoTune.trainRange')}</span>
+                <span className="flex items-center gap-2">
+                  <span className="tabular-nums">{trainRangeDates.start} ~ {trainRangeDates.end}</span>
+                  <span className="text-[10px]">{trainRangeExpanded ? '▲' : '▼'}</span>
+                </span>
+              </button>
+              {trainRangeExpanded ? (
+                <div className="relative h-5">
+                  <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-border/70" />
+                  <div
+                    className="pointer-events-none absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary/40"
+                    style={{
+                      left: `${((trainRangePct?.[0] ?? 0) / TRAIN_RANGE_SCALE) * 100}%`,
+                      width: `${(((trainRangePct?.[1] ?? TRAIN_RANGE_SCALE) - (trainRangePct?.[0] ?? 0)) / TRAIN_RANGE_SCALE) * 100}%`,
+                    }}
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={TRAIN_RANGE_SCALE}
+                    value={trainRangePct?.[0] ?? 0}
+                    onChange={(event) => handleTrainRangeChange('start', Number(event.target.value))}
+                    aria-label={t('priceHistory.autoTune.trainRangeStart')}
+                    className="pointer-events-none absolute inset-x-0 top-0 h-5 w-full appearance-none bg-transparent [&::-moz-range-thumb]:pointer-events-auto [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-primary/70 [&::-moz-range-thumb]:bg-card [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-primary/70 [&::-webkit-slider-thumb]:bg-card"
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={TRAIN_RANGE_SCALE}
+                    value={trainRangePct?.[1] ?? TRAIN_RANGE_SCALE}
+                    onChange={(event) => handleTrainRangeChange('end', Number(event.target.value))}
+                    aria-label={t('priceHistory.autoTune.trainRangeEnd')}
+                    className="pointer-events-none absolute inset-x-0 top-0 h-5 w-full appearance-none bg-transparent [&::-moz-range-thumb]:pointer-events-auto [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-primary/70 [&::-moz-range-thumb]:bg-card [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-primary/70 [&::-webkit-slider-thumb]:bg-card"
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-border/60 text-secondary-text">
+                  <th className="py-1 pr-2 font-medium">{t('priceHistory.autoTune.strategy')}</th>
+                  <th className="py-1 pr-2 font-medium">CAGR</th>
+                  <th className="py-1 pr-2 font-medium">{t('priceHistory.autoTune.colAfterTaxCagr')}</th>
+                  <th className="py-1 pr-2 font-medium">Sharpe</th>
+                  <th className="py-1 pr-2 font-medium">Max DD</th>
+                  <th className="py-1 pr-2 font-medium">PF</th>
+                  <th className="py-1 pr-2 font-medium">{t('priceHistory.autoTune.trades')}</th>
+                  <th className="py-1 pr-2 font-medium">{t('priceHistory.autoTune.avgTrade')}</th>
+                  <th className="py-1 font-medium">{t('priceHistory.autoTune.oos')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {autoTuneResult.strategies.map((strategy: AutoTuneStrategyResult, index: number) => {
+                  const tv = strategy.metrics.trainValidation;
+                  const test = strategy.metrics.test;
+                  const recommended = strategy.key === autoTuneResult.recommended.strategyKey;
+                  const selected = strategy.key === selectedAutoTuneKey;
+                  return (
+                    <tr
+                      key={strategy.key}
+                      tabIndex={0}
+                      aria-selected={selected}
+                      onClick={() => setSelectedStrategyKey(strategy.key)}
+                      onKeyDown={(event) => handleStrategyRowKeyDown(event, index)}
+                      className={`cursor-pointer border-b border-border/40 outline-none transition-colors focus-visible:ring-1 focus-visible:ring-primary ${
+                        selected ? 'bg-primary/10' : 'hover:bg-primary/5'
+                      }`}
+                    >
+                      <td className="py-1 pr-2">
+                        <span className={`font-semibold ${selected ? 'text-primary' : 'text-foreground'}`}>
+                          {(language === 'zh' ? strategy.nameZh : strategy.nameEn) || strategy.key}
+                        </span>
+                        {recommended ? (
+                          <span className="ml-1 text-[10px] text-primary">{t('priceHistory.autoTune.recommendedTag')}</span>
+                        ) : null}
+                        {!strategy.tuned ? (
+                          <span className="ml-1 text-[10px] text-secondary-text">{t('priceHistory.autoTune.baselineTag')}</span>
+                        ) : null}
+                      </td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.cagrPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.afterTaxCagrPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.sharpe)}</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.maxDrawdownPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.profitFactor)}</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{tv?.trades ?? '--'}</td>
+                      <td className="py-1 pr-2 tabular-nums text-foreground">{formatAutoTuneValue(tv?.avgTradePct)}%</td>
+                      <td className="py-1 tabular-nums text-foreground">{formatAutoTuneValue(test?.cagrPct)}%</td>
+                    </tr>
+                  );
+                })}
+                {autoTuneResult.benchmarks.map((benchmark: AutoTuneBenchmark) => {
+                  const tv = benchmark.metrics.trainValidation;
+                  const test = benchmark.metrics.test;
+                  return (
+                    <tr key={benchmark.key} className="border-b border-border/40 last:border-b-0">
+                      <td className="py-1 pr-2">
+                        <span className="text-secondary-text">
+                          {(language === 'zh' ? benchmark.nameZh : benchmark.nameEn) || benchmark.key}
+                        </span>
+                        <span className="ml-1 text-[10px] text-secondary-text">{t('priceHistory.autoTune.benchmarkTag')}</span>
+                      </td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.cagrPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.afterTaxCagrPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.sharpe)}</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.maxDrawdownPct)}%</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.profitFactor)}</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{tv?.trades ?? '--'}</td>
+                      <td className="py-1 pr-2 tabular-nums text-secondary-text">{formatAutoTuneValue(tv?.avgTradePct)}%</td>
+                      <td className="py-1 tabular-nums text-secondary-text">{formatAutoTuneValue(test?.cagrPct)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-1 text-[11px] text-secondary-text">
+            {t('priceHistory.autoTune.taxNote', {
+              long: String(autoTuneResult.assumptions.capitalGainsTaxLongTermPct ?? ''),
+              short: String(autoTuneResult.assumptions.capitalGainsTaxShortTermPct ?? ''),
+            })}
+          </div>
+          {autoTuneEquityPlot ? (
+            <div className="mt-3">
+              <div className="mb-1 text-xs font-medium text-secondary-text">
+                {t('priceHistory.autoTune.cumulativeTitle')}
+              </div>
+              <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                {autoTuneEquityPlot.seriesList.map((series) => {
+                  const isSelected = series.key === selectedAutoTuneKey;
+                  const lastValue = series.values[series.values.length - 1];
+                  return (
+                    <span
+                      key={series.key}
+                      className={`flex items-center gap-1.5 ${isSelected ? 'font-semibold text-foreground' : 'text-secondary-text'}`}
+                    >
+                      <span
+                        className="inline-block h-0.5 w-5"
+                        style={{
+                          background: series.dashed ? 'transparent' : series.color,
+                          backgroundImage: series.dashed
+                            ? `repeating-linear-gradient(to right, ${series.color} 0 4px, transparent 4px 7px)`
+                            : undefined,
+                        }}
+                      />
+                      {series.label}
+                      {typeof lastValue === 'number' && Number.isFinite(lastValue) ? (
+                        <span className={`tabular-nums ${lastValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {formatEquityPct(lastValue)}
+                        </span>
+                      ) : null}
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="relative">
+                <svg
+                  width={autoTuneEquityPlot.width}
+                  viewBox={`0 0 ${autoTuneEquityPlot.width} 160`}
+                  role="img"
+                  aria-label={t('priceHistory.autoTune.cumulativeTitle')}
+                  className="block h-40 w-full"
+                  onMouseMove={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    if (rect.width <= 0) return;
+                    const px = ((event.clientX - rect.left) / rect.width) * autoTuneEquityPlot.width;
+                    const ratio = (px - autoTuneEquityPlot.left) / Math.max(autoTuneEquityPlot.plotWidth, 1);
+                    const index = Math.round(ratio * Math.max(autoTuneEquityPlot.refLength - 1, 0));
+                    setEquityHoverIndex(index >= 0 && index < autoTuneEquityPlot.refLength ? index : null);
+                  }}
+                  onMouseLeave={() => setEquityHoverIndex(null)}
+                >
+                  {autoTuneEquityPlot.gridTicks.map((value) => (
+                    <g key={`equity-tick-${value}`}>
+                      <line
+                        x1={autoTuneEquityPlot.left}
+                        x2={autoTuneEquityPlot.width - autoTuneEquityPlot.right}
+                        y1={autoTuneEquityPlot.y(value)}
+                        y2={autoTuneEquityPlot.y(value)}
+                        stroke="var(--border)"
+                        strokeOpacity={Math.abs(value) < 1e-9 ? '0.6' : '0.35'}
+                      />
+                      <text
+                        x={autoTuneEquityPlot.width - autoTuneEquityPlot.right + 6}
+                        y={autoTuneEquityPlot.y(value) + 3}
+                        fontSize="10"
+                        fill="#ffffff"
+                      >
+                        {value}%
+                      </text>
+                    </g>
+                  ))}
+                  {equityHoverIndex !== null ? (
+                    <line
+                      x1={autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength)}
+                      x2={autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength)}
+                      y1={autoTuneEquityPlot.top}
+                      y2={autoTuneEquityPlot.axisY}
+                      stroke="var(--border)"
+                      strokeOpacity="0.9"
+                      strokeDasharray="3 3"
+                    />
+                  ) : null}
+                  {autoTuneEquityPlot.dateTicks.map((tick, index) => (
+                    <text
+                      key={`equity-date-${index}`}
+                      x={tick.x}
+                      y={autoTuneEquityPlot.axisY + 12}
+                      fontSize="10"
+                      fill="#ffffff"
+                      textAnchor={
+                        index === 0 ? 'start' : index === autoTuneEquityPlot.dateTicks.length - 1 ? 'end' : 'middle'
+                      }
+                    >
+                      {tick.label}
+                    </text>
+                  ))}
+                  {autoTuneEquityPlot.seriesList.map((series) => {
+                    const isSelected = series.key === selectedAutoTuneKey;
+                    return (
+                      <path
+                        key={`equity-${series.key}`}
+                        d={buildSmoothLinePath(
+                          series.values,
+                          (i) => autoTuneEquityPlot.x(i, series.values.length),
+                          autoTuneEquityPlot.y,
+                        )}
+                        fill="none"
+                        stroke={series.color}
+                        strokeWidth={isSelected ? '3' : series.dashed ? '1.5' : '2'}
+                        strokeDasharray={series.dashed ? '6 4' : undefined}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        opacity={isSelected ? '1' : series.dashed ? '0.7' : '0.85'}
+                      />
+                    );
+                  })}
+                  {equityHoverIndex !== null
+                    ? autoTuneEquityPlot.seriesList.map((series) => {
+                        const value = series.values[equityHoverIndex];
+                        if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+                        return (
+                          <circle
+                            key={`equity-dot-${series.key}`}
+                            cx={autoTuneEquityPlot.x(equityHoverIndex, series.values.length)}
+                            cy={autoTuneEquityPlot.y(value)}
+                            r={series.key === selectedAutoTuneKey ? 4 : 3}
+                            fill={series.color}
+                          />
+                        );
+                      })
+                    : null}
+                </svg>
+                {equityHoverIndex !== null && autoTuneEquityPlot.dates[equityHoverIndex] ? (
+                  <div
+                    className="pointer-events-none absolute top-1 z-10 min-w-[150px] rounded-lg border border-border/70 bg-card/95 p-2 text-xs shadow-lg"
+                    style={{
+                      left: `${(autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength) / autoTuneEquityPlot.width) * 100}%`,
+                      transform:
+                        equityHoverIndex > autoTuneEquityPlot.refLength * 0.55
+                          ? 'translateX(calc(-100% - 10px))'
+                          : 'translateX(10px)',
+                    }}
+                  >
+                    <div className="mb-1 font-medium text-secondary-text">
+                      {autoTuneEquityPlot.dates[equityHoverIndex]}
+                    </div>
+                    {autoTuneEquityPlot.seriesList.map((series) => {
+                      const value = series.values[equityHoverIndex];
+                      if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+                      return (
+                        <div key={`equity-tip-${series.key}`} className="flex items-center gap-1.5 whitespace-nowrap">
+                          <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: series.color }} />
+                          <span className="truncate text-secondary-text">{series.label}</span>
+                          <span className={`ml-auto pl-2 font-medium tabular-nums ${value >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {formatEquityPct(value)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-2 text-xs text-secondary-text">
+            {t('priceHistory.autoTune.recommended')}
+            {': '}
+            <span className="font-semibold text-foreground">
+              {(language === 'zh'
+                ? autoTuneResult.strategies.find((s) => s.key === autoTuneResult.recommended.strategyKey)?.nameZh
+                : autoTuneResult.strategies.find((s) => s.key === autoTuneResult.recommended.strategyKey)?.nameEn)
+                ?? autoTuneResult.recommended.strategyKey}
+            </span>
+            {' · '}
+            {AUTO_TUNE_REASON_KEYS[autoTuneResult.recommended.reasonCode]
+              ? t(AUTO_TUNE_REASON_KEYS[autoTuneResult.recommended.reasonCode] as UiTextKey)
+              : autoTuneResult.recommended.reasonCode}
+          </div>
+          <div className="mt-2 text-xs text-secondary-text">
+            {t('priceHistory.autoTune.selected')}
+            {': '}
+            <span className="font-semibold text-primary">
+              {(language === 'zh' ? selectedAutoTuneStrategy?.nameZh : selectedAutoTuneStrategy?.nameEn)
+                || selectedAutoTuneKey}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
+            {selectedParamDisplay.map((param) => (
+              <label key={param.key} className="flex flex-col gap-0.5 text-xs text-secondary-text">
+                <span>
+                  {AUTO_TUNE_PARAM_LABEL_KEYS[param.key]
+                    ? t(AUTO_TUNE_PARAM_LABEL_KEYS[param.key] as UiTextKey)
+                    : param.key}
+                </span>
+                <span className="font-semibold tabular-nums text-foreground">
+                  {formatAutoTuneValue(param.value)}
+                  {typeof param.default === 'number' && param.default !== param.value ? (
+                    <span className="ml-1 font-normal text-secondary-text">({formatAutoTuneValue(param.default)})</span>
+                  ) : null}
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-secondary-text">{t('priceHistory.autoTune.fixedParams')}</span>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="primary" size="sm" onClick={applyAutoTunedThresholds}>
+                {t('priceHistory.autoTune.applySelected')}
+              </Button>
+            </div>
+          </div>
+          {/* Save preset / preset list */}
+          <div className="mt-3 border-t border-border/40 pt-2">
+            {showPresetInput ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={presetNameInput}
+                  onChange={(e) => setPresetNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') savePreset();
+                    if (e.key === 'Escape') { setShowPresetInput(false); setPresetNameInput(''); }
+                  }}
+                  placeholder={t('priceHistory.autoTune.presets.namePlaceholder')}
+                  className="flex-1 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
+                  autoFocus
+                />
+                <Button variant="primary" size="sm" onClick={savePreset} disabled={!presetNameInput.trim()}>
+                  {t('priceHistory.autoTune.presets.save')}
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => { setShowPresetInput(false); setPresetNameInput(''); }}>
+                  {t('priceHistory.autoTune.presets.cancel')}
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="secondary" size="sm" onClick={() => setShowPresetInput(true)}>
+                  {t('priceHistory.autoTune.presets.saveAs')}
+                </Button>
+                {presets.length > 0 ? (
+                  <span className="text-xs text-secondary-text">
+                    {t('priceHistory.autoTune.presets.saved')}:
+                  </span>
+                ) : null}
+                {presets.map((p) => (
+                  <span
+                    key={p.id}
+                    className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-card/60 px-2 py-0.5 text-xs text-foreground"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => loadPreset(p)}
+                      className="hover:text-primary"
+                      title={t('priceHistory.autoTune.presets.loadTooltip')}
+                    >
+                      {p.name}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deletePreset(p.id)}
+                      className="ml-0.5 text-secondary-text hover:text-red-400"
+                      title={t('priceHistory.autoTune.presets.deleteTooltip')}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+          {/* Fine Tune sweep results */}
+          {autoTuneResult.fineTune && autoTuneResult.fineTune.sweep.length > 0 ? (
+            <div className="mt-3 border-t border-border/40 pt-2">
+              <div className="mb-1 text-xs font-medium text-secondary-text">
+                {t('priceHistory.autoTune.fineTune.title')}
+                {' · '}
+                {autoTuneResult.fineTune.positionsTested} {t('priceHistory.autoTune.fineTune.position')}
+                {' · '}
+                {t('priceHistory.autoTune.fineTune.window')}: {autoTuneResult.fineTune.windowDays}D
+              </div>
+              {/* CAGR bar chart */}
+              <FineTuneSweepChart sweep={autoTuneResult.fineTune.sweep} bestIndex={autoTuneResult.fineTune.bestPositionIndex} />
+              {/* Sweep detail table (collapsed by default) */}
+              <button
+                type="button"
+                onClick={() => setFineTuneTableExpanded((prev) => !prev)}
+                className="mt-2 flex w-full items-center justify-between text-xs text-secondary-text hover:text-foreground"
+              >
+                <span>{t('priceHistory.autoTune.fineTune.detailToggle')}</span>
+                <span className="text-[10px]">{fineTuneTableExpanded ? '▲' : '▼'}</span>
+              </button>
+              {fineTuneTableExpanded ? (
+              <div className="mt-1 overflow-x-auto">
+                <table className="w-full text-xs text-secondary-text">
+                  <thead>
+                    <tr className="border-b border-border/40">
+                      <th className="px-2 py-1 text-left font-medium">#</th>
+                      <th className="px-2 py-1 text-left font-medium">{t('priceHistory.autoTune.fineTune.trainRange')}</th>
+                      <th className="px-2 py-1 text-left font-medium">{t('priceHistory.autoTune.fineTune.strategy')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.oosCagr')}</th>
+                      <th className="px-2 py-1 text-right font-medium">Sharpe</th>
+                      <th className="px-2 py-1 text-right font-medium">Max DD</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.trades')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {autoTuneResult.fineTune.sweep.map((pos) => {
+                      const isBest = pos.positionIndex === autoTuneResult.fineTune!.bestPositionIndex;
+                      const stratLabel = language === 'zh'
+                        ? (pos.allStrategies.find((s) => s.key === pos.bestStrategyKey)?.nameZh ?? pos.bestStrategyKey)
+                        : (pos.allStrategies.find((s) => s.key === pos.bestStrategyKey)?.nameEn ?? pos.bestStrategyKey);
+                      return (
+                        <tr
+                          key={pos.positionIndex}
+                          className={`border-b border-border/20 ${isBest ? 'bg-primary/10 font-semibold text-foreground' : ''}`}
+                        >
+                          <td className="px-2 py-1">
+                            {pos.positionIndex + 1}
+                            {isBest ? <span className="ml-1 text-primary">★</span> : null}
+                          </td>
+                          <td className="px-2 py-1">{pos.trainStart} ~ {pos.trainEnd} ({pos.trainBars}D)</td>
+                          <td className="px-2 py-1">{stratLabel}</td>
+                          <td className={`px-2 py-1 text-right tabular-nums ${pos.testCagr >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {pos.testCagr.toFixed(1)}%
+                          </td>
+                          <td className="px-2 py-1 text-right tabular-nums">{pos.testSharpe.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right tabular-nums text-red-400">{pos.testMaxDd.toFixed(1)}%</td>
+                          <td className="px-2 py-1 text-right tabular-nums">{pos.testTrades}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {autoTuneError ? (
+        <div className="order-3 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-400">
+          {t('priceHistory.autoTune.error')}: {autoTuneError}
+        </div>
+      ) : null}
+
+      <div className="order-1 mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-secondary-text">{t('priceHistory.daysLabel')}</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {DAY_OPTIONS.map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setDays(value)}
+              className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                days === value
+                  ? 'border-primary/50 bg-primary/10 text-primary'
+                  : 'border-border/70 bg-background/50 text-secondary-text hover:bg-hover hover:text-foreground'
+              }`}
+            >
+              {value % 365 === 0
+                ? `${value / 365}${t('priceHistory.yearsSuffix')}`
+                : `${value}${t('priceHistory.daysSuffix')}`}
+            </button>
+          ))}
+        </div>
+        <span className="mx-1 hidden h-4 w-px bg-border/60 sm:block" aria-hidden />
         <span className="text-xs font-medium text-secondary-text">{t('priceHistory.triggers')}</span>
-        {TRIGGER_GROUPS.map(({ key, label }) => (
+        {TRIGGER_GROUPS.map(({ key, label, labelKey }) => (
           <button
             key={key}
             type="button"
@@ -576,11 +2239,12 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 visibleTriggers[key] ? 'bg-primary' : 'bg-border'
               }`}
             />
-            {label}
+            {labelKey ? t(labelKey) : label}
           </button>
         ))}
       </div>
 
+      <div className="order-2">
       {isLoading && !result ? (
         <DashboardStateBlock loading title={t('priceHistory.loading')} />
       ) : error ? (
@@ -644,6 +2308,15 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 </text>
               ))}
 
+              {bollBandPath ? (
+                <path
+                  d={bollBandPath}
+                  fill={COLOR_BOLL_FILL}
+                  fillOpacity="0.1"
+                  stroke="none"
+                />
+              ) : null}
+
               {linePaths.map((line, index) => (
                 <path
                   key={`line-${index}`}
@@ -661,10 +2334,37 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               {visibleTriggers.macd ? markers?.macdBuy.map((m) => renderMarker(m, 'circle', BUY, true)) : null}
               {visibleTriggers.obv ? markers?.obvBuy.map((m) => renderMarker(m, 'triangleUp', BUY)) : null}
               {visibleTriggers.rsi ? markers?.rsiBuy.map((m) => renderMarker(m, 'cross', BUY)) : null}
+              {visibleTriggers.boll
+                ? markers?.bollBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.boll.buyShape, BUY))
+                : null}
+              {visibleTriggers.cci
+                ? markers?.cciBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.cci.buyShape, BUY))
+                : null}
+              {visibleTriggers.dmi
+                ? markers?.dmiBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.dmi.buyShape, BUY))
+                : null}
+              {visibleTriggers.mfi
+                ? markers?.mfiBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.mfi.buyShape, BUY))
+                : null}
               {visibleTriggers.kdj ? markers?.kdjSell.map((m) => renderMarker(m, 'square', SELL)) : null}
               {visibleTriggers.macd ? markers?.macdSell.map((m) => renderMarker(m, 'circle', SELL, true)) : null}
               {visibleTriggers.obv ? markers?.obvSell.map((m) => renderMarker(m, 'triangleDown', SELL)) : null}
               {visibleTriggers.rsi ? markers?.rsiSell.map((m) => renderMarker(m, 'cross', SELL)) : null}
+              {visibleTriggers.boll
+                ? markers?.bollSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.boll.sellShape, SELL))
+                : null}
+              {visibleTriggers.cci
+                ? markers?.cciSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.cci.sellShape, SELL))
+                : null}
+              {visibleTriggers.dmi
+                ? markers?.dmiSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.dmi.sellShape, SELL))
+                : null}
+              {visibleTriggers.mfi
+                ? markers?.mfiSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.mfi.sellShape, SELL))
+                : null}
+
+              {visibleTriggers.compositeBuy ? compositeMarkers?.buy.map(({ marker, score }) => renderCompositeMarker(marker, score, 'buy')) : null}
+              {visibleTriggers.compositeSell ? compositeMarkers?.sell.map(({ marker, score }) => renderCompositeMarker(marker, score, 'sell')) : null}
 
               <rect
                 x={PADDING.left}
@@ -748,11 +2448,57 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
             </span>
             <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.rsi ? '' : 'opacity-40'}`}>
               <span style={{ color: BUY }}>✕</span>
-              RSI {t('priceHistory.legend.macdBuy')}
+              {t('priceHistory.legend.rsiBuy')}
             </span>
             <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.rsi ? '' : 'opacity-40'}`}>
               <span style={{ color: SELL }}>✕</span>
-              RSI {t('priceHistory.legend.macdSell')}
+              {t('priceHistory.legend.rsiSell')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.boll ? '' : 'opacity-40'}`}>
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{ background: EXTRA_GROUP_STYLES.boll.buyColor }}
+              />
+              {t('priceHistory.legend.bollBuy')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.boll ? '' : 'opacity-40'}`}>
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{ background: EXTRA_GROUP_STYLES.boll.sellColor }}
+              />
+              {t('priceHistory.legend.bollSell')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.cci ? '' : 'opacity-40'}`}>
+              <span className="inline-block h-2.5 w-2.5" style={{ background: EXTRA_GROUP_STYLES.cci.buyColor }} />
+              {t('priceHistory.legend.cciBuy')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.cci ? '' : 'opacity-40'}`}>
+              <span className="inline-block h-2.5 w-2.5" style={{ background: EXTRA_GROUP_STYLES.cci.sellColor }} />
+              {t('priceHistory.legend.cciSell')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.dmi ? '' : 'opacity-40'}`}>
+              <span style={{ color: EXTRA_GROUP_STYLES.dmi.buyColor }}>▲</span>
+              {t('priceHistory.legend.dmiBuy')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.dmi ? '' : 'opacity-40'}`}>
+              <span style={{ color: EXTRA_GROUP_STYLES.dmi.sellColor }}>▼</span>
+              {t('priceHistory.legend.dmiSell')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.mfi ? '' : 'opacity-40'}`}>
+              <span style={{ color: EXTRA_GROUP_STYLES.mfi.buyColor }}>✕</span>
+              {t('priceHistory.legend.mfiBuy')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.mfi ? '' : 'opacity-40'}`}>
+              <span style={{ color: EXTRA_GROUP_STYLES.mfi.sellColor }}>✕</span>
+              {t('priceHistory.legend.mfiSell')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.compositeBuy ? '' : 'opacity-40'}`}>
+              <span style={{ color: BUY }}>▲</span>
+              {t('priceHistory.legend.compositeBuy')}
+            </span>
+            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.compositeSell ? '' : 'opacity-40'}`}>
+              <span style={{ color: SELL }}>▼</span>
+              {t('priceHistory.legend.compositeSell')}
             </span>
             {SMA_DOTTED.map(({ key, color }) => (
               <span key={`sma-legend-${key}`} className="flex items-center gap-1.5">
@@ -768,72 +2514,56 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               {t('priceHistory.range')} {rangeLabel}
             </span>
           </div>
-          {result.benefitSeriesByTrigger && Object.keys(result.benefitSeriesByTrigger).length ? (
-            <div className="mt-3">
-              <div className="mb-1 flex items-center justify-between text-xs text-secondary-text">
-                <span>Trigger benefit %</span>
-                <span className="text-secondary-text">Window: {transactionWindow}D · Tune: {tuningTrigger.toUpperCase()}</span>
-              </div>
-              <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                {Object.keys(result.benefitSeriesByTrigger).map((trigger) => (
-                  <span key={trigger} className="flex items-center gap-1.5 text-secondary-text">
-                    <span className="inline-block h-0.5 w-5" style={{ background: BENEFIT_COLORS[trigger] ?? '#ffffff' }} />
-                    {trigger.toUpperCase()}
-                    <span className="text-foreground">{(result.benefitByTrigger?.[trigger] ?? 0).toFixed(2)}%</span>
-                  </span>
-                ))}
-              </div>
-              <svg width={geometry.width} viewBox={`0 0 ${geometry.width} 104`} role="img" aria-label="Accumulated benefit percentage" className="block h-28 w-full">
-                {[-30, 0, 30].map((value) => {
-                  const py = 64 - Math.max(-30, Math.min(30, value)) * 0.8;
-                  return (
-                    <g key={`benefit-tick-${value}`}>
-                      <line x1={PADDING.left} x2={geometry.width - PADDING.right} y1={py} y2={py} stroke="var(--border)" strokeOpacity="0.35" />
-                      <text x={geometry.width - PADDING.right + 6} y={py + 3} fontSize="10" fill="#ffffff">
-                        {value}%
-                      </text>
-                    </g>
-                  );
-                })}
-                {geometry.dateTicks.map((tick, index) => (
-                  <text
-                    key={`benefit-date-${index}`}
-                    x={tick.x}
-                    y={92}
-                    fontSize="10"
-                    fill="#ffffff"
-                    textAnchor={index === 0 ? 'start' : index === geometry.dateTicks.length - 1 ? 'end' : 'middle'}
-                  >
-                    {tick.label}
-                  </text>
-                ))}
-                {Object.entries(result.benefitSeriesByTrigger).map(([trigger, series]) => {
-                  const color = BENEFIT_COLORS[trigger] ?? '#ffffff';
-                  const yMap = (value: number) => 64 - Math.max(-30, Math.min(30, value)) * 0.8;
-                  return (
-                    <g key={trigger}>
-                      <path
-                        d={buildSmoothAreaPath(series, geometry.x, yMap, 64)}
-                        fill={color}
-                        fillOpacity="0.18"
-                        stroke="none"
-                      />
-                      <path
-                        d={buildSmoothLinePath(series, geometry.x, yMap)}
-                        fill="none"
-                        stroke={color}
-                        strokeWidth="2"
-                        strokeLinejoin="round"
-                        strokeLinecap="round"
-                      />
-                    </g>
-                  );
-                })}
-              </svg>
+
+      {latestComposite ? (
+        <div className="mt-3 rounded-xl border border-border/60 bg-background/40 p-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <span className="font-semibold text-foreground">{t('priceHistory.compositeScore')}</span>
+            <span className="font-semibold" style={{ color: BUY }}>
+              {t('priceHistory.compositeBuy')}: {latestComposite.buyScore}/{latestComposite.maxBuyScore ?? 10}
+            </span>
+            <span className="font-semibold" style={{ color: SELL }}>
+              {t('priceHistory.compositeSell')}: {latestComposite.sellScore}/{latestComposite.maxSellScore ?? 10}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowCompositeDebug((value) => !value)}
+              className="rounded-lg border border-border/70 bg-background/50 px-2 py-1 text-xs font-medium text-secondary-text transition-colors hover:bg-hover hover:text-foreground"
+            >
+              {showCompositeDebug ? t('priceHistory.compositeHide') : t('priceHistory.compositeDetails')}
+            </button>
+          </div>
+          {showCompositeDebug && latestComposite.buyBreakdown && latestComposite.sellBreakdown ? (
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {(['buy', 'sell'] as const).map((kind) => {
+                const breakdown = kind === 'buy' ? latestComposite.buyBreakdown : latestComposite.sellBreakdown;
+                const score = kind === 'buy' ? latestComposite.buyScore : latestComposite.sellScore;
+                const color = kind === 'buy' ? BUY : SELL;
+                return (
+                  <div key={kind} className="rounded-lg border border-border/50 p-2 text-xs">
+                    <div className="mb-1 font-semibold" style={{ color }}>
+                      {kind === 'buy' ? t('priceHistory.compositeBuy') : t('priceHistory.compositeSell')}
+                    </div>
+                    {COMPOSITE_FACTOR_ROWS.map(({ key, labelKey }) => (
+                      <div key={key} className="flex justify-between">
+                        <span className="text-secondary-text">{t(labelKey as UiTextKey)}</span>
+                        <span className="text-foreground">+{breakdown[key] ?? 0}</span>
+                      </div>
+                    ))}
+                    <div className="mt-1 flex justify-between border-t border-border/50 pt-1 font-semibold text-foreground">
+                      <span>{kind === 'buy' ? t('priceHistory.compositeBuy') : t('priceHistory.compositeSell')}</span>
+                      <span>= {score}</span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ) : null}
+        </div>
+      ) : null}
         </>
       )}
+      </div>
     </Card>
   );
 };

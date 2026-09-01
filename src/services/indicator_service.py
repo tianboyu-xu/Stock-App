@@ -15,8 +15,14 @@
 from __future__ import annotations
 
 import math
-import statistics
 from typing import Any, Dict, List, Optional, Sequence
+
+from src.services.composite_factors import (
+    FACTOR_BREAKDOWN_KEYS,
+    ExtraFactorScorer,
+    compute_extra_factor_series,
+    compute_extra_triggers,
+)
 
 # Excel "Today" 工作表第 52 行的默认阈值
 DEFAULT_THRESHOLDS: Dict[str, float] = {
@@ -27,11 +33,56 @@ DEFAULT_THRESHOLDS: Dict[str, float] = {
     "kdj_sell": 70.0,      # J52 KDJ Sell
     "rsi_buy": 10.0,       # K52 RSI Buy
     "rsi_sell": 70.0,      # L52 RSI Sell
+    # 复合 BUY/SELL 评分阈值（归一化，不依赖绝对价格量级）
+    "composite_buy_threshold": 6.0,   # BUY 评分触发阈值（满分 10）
+    "composite_sell_threshold": 6.0,  # SELL 评分触发阈值（满分 10）
+    "macd_lookback": 120.0,           # MACD 百分位回看窗口（根，不含当前 bar）
+    "macd_low_percentile": 15.0,      # MACD 低位百分位阈值（%）
+    "macd_high_percentile": 85.0,     # MACD 高位百分位阈值（%）
+    "rsi_low": 15.0,                  # RSI 超卖阈值
+    "rsi_high": 85.0,                 # RSI 超买阈值
+    "kdj_low": 40.0,                  # KDJ 超卖阈值（K、D 同时低于该值）
+    "kdj_high": 70.0,                 # KDJ 超买阈值（K、D 同时高于该值）
+    "trend_period": 200.0,            # 长期趋势均线周期（regime 分）
+    "momentum_period": 5.0,           # 价格动量回看周期（根）
+    "momentum_min_change_pct": 0.25,  # 动量改善/恶化的最小变化阈值（%），并要求当日价格同向确认
+    # 指标周期参数（默认与经典设置一致；供微调使用）
+    "macd_fast": 12.0,                # MACD 快线 EMA 周期
+    "macd_slow": 26.0,                # MACD 慢线 EMA 周期
+    "macd_signal": 9.0,               # MACD 信号线 EMA 周期
+    "kdj_period": 9.0,                # KDJ RSV 窗口周期
+    "rsi_period": 14.0,               # RSI 计算周期
+    "rsi_smooth_fast": 6.0,           # RSI 快速平滑周期（RSI6）
+    "rsi_smooth_slow": 14.0,          # RSI 慢速平滑周期（RSI14）
+    # 扩展因子（BOLL/CCI/DMI/MFI/量能/52 周位置）：
+    # 触发水平 + 权重（整数点数），权重 0 = 不参与复合评分（保持旧代际行为）
+    "boll_buy_level": 0.1,            # BOLL %B 向上穿越的看多水平
+    "boll_sell_level": 0.9,           # BOLL %B 向下穿越的看空水平
+    "boll_weight": 0.0,               # BOLL %B 因子分数权重
+    "cci_buy_level": -100.0,          # CCI 向上穿越的看多水平
+    "cci_sell_level": 100.0,          # CCI 向下穿越的看空水平
+    "cci_weight": 0.0,                # CCI 因子分数权重
+    "adx_min_level": 20.0,            # DMI 触发要求的 ADX 趋势强度下限
+    "dmi_weight": 0.0,                # DMI 因子分数权重
+    "mfi_buy_level": 20.0,            # MFI 向上穿越的看多水平
+    "mfi_sell_level": 80.0,           # MFI 向下穿越的看空水平
+    "mfi_weight": 0.0,                # MFI 因子分数权重
+    "volume_confirm_level": 1.5,      # 量能确认：volume/SMA20(volume) 下限
+    "volume_weight": 0.0,             # 量能确认因子分数权重
+    "range52_high_level": 0.95,       # 52 周位置：close/252 日最高 的看多水平
+    "range52_low_level": 1.05,        # 52 周位置：close/252 日最低 的看空水平
+    "range52_weight": 0.0,            # 52 周位置因子分数权重
 }
 
 SMA_PERIODS = [5, 9, 10, 12, 20, 26, 30, 40, 50, 60, 120, 200]
 EMA_PERIODS = [5, 9, 12, 20, 26, 40, 60, 120, 200]
 OBV_PERIODS = [5, 10, 20, 40, 60]
+
+# 经典复合评分满分：MACD/KDJ/RSI/动量各 2 分 + 趋势 regime 2 分。
+# 扩展因子（BOLL/CCI/DMI/MFI/量能/52 周位置）在经典分之上按权重加分，
+# 最终满分 = 经典满分 + 启用扩展因子权重和（默认权重 0 → 满分仍为 10）。
+MAX_BUY_SCORE = 10
+MAX_SELL_SCORE = 10
 
 
 def _closes(bars: Sequence[Dict[str, Any]]) -> List[float]:
@@ -84,6 +135,18 @@ def _rolling_max(values: Sequence[float], period: int) -> List[Optional[float]]:
     return out
 
 
+def _percentile_rank(values: Sequence[float], current: float) -> Optional[float]:
+    """`current` 在 `values` 中的百分位（0-100），用于归一化比较。
+
+    与全历史极值不同，这里只依赖传入的滚动窗口，因此对不同价格量级的
+    股票都适用。窗口为空时返回 None（调用方跳过该 bar 的评分）。
+    """
+    if not values:
+        return None
+    count = sum(1 for v in values if v <= current)
+    return count * 100.0 / len(values)
+
+
 def compute_indicators(
     bars: Sequence[Dict[str, Any]],
     thresholds: Optional[Dict[str, float]] = None,
@@ -112,9 +175,31 @@ def compute_indicators(
                 "kdj_buy": [...], "kdj_sell": [...],
                 "rsi_buy": [...], "rsi_sell": [...],
                 "obv_buy": [...], "obv_sell": [...],
+                "boll_buy": [...], "boll_sell": [...],
+                "cci_buy": [...], "cci_sell": [...],
+                "dmi_buy": [...], "dmi_sell": [...],
+                "mfi_buy": [...], "mfi_sell": [...],
+            },
+            "composite": {
+                "buy_score": [...], "sell_score": [...],
+                "buy_signal": [...], "sell_signal": [...],
+                "buy_breakdown": [{"macd":..,"kdj":..,"rsi":..,"regime":..,"momentum":..,
+                                   "boll":..,"cci":..,"dmi":..,"mfi":..,"volume":..,"range52":..}, ...],
+                "sell_breakdown": [...],
+                "max_buy_score": 10 + 启用扩展因子权重和, "max_sell_score": 同上,
             },
         }
         所有序列与输入等长，触发器序列为收盘价或 None。
+        复合评分为归一化 BUY/SELL 评分（经典因子满分均为 10：
+        MACD/KDJ/RSI/动量各 2 分 + 趋势 regime 2 分），
+        扩展因子（BOLL %B / CCI / DMI / MFI / 量能 / 52 周位置）按各自
+        权重（默认 0，即禁用）在经典分基础上加分，满分随之动态变化；
+        动量因子衡量 ROC 环比改善/恶化而非绝对涨跌，
+        且要求当日收盘价同向确认（改善且上涨才计 BUY 分，
+        恶化且下跌才计 SELL 分）；
+        MACD 百分位要求完整回看窗口；
+        信号仅在评分“进入”阈值区间的那根 bar 触发，
+        同一根 bar 买卖同时进入区间时不产生标记；无未来函数。
     """
     th = dict(DEFAULT_THRESHOLDS)
     if thresholds:
@@ -139,13 +224,15 @@ def compute_indicators(
     sma = {str(p): _sma(close, p) for p in SMA_PERIODS}
     ema = {str(p): _ema(close, p) for p in EMA_PERIODS}
 
-    # MACD = EMA12 - EMA26; Signal = EMA9(MACD)
-    ema12 = ema["12"]
-    ema26 = ema["26"]
+    # MACD = EMA(fast) - EMA(slow); Signal = EMA(signal)(MACD)
+    macd_fast = max(1, int(th["macd_fast"]))
+    macd_slow = max(macd_fast + 1, int(th["macd_slow"]))
+    ema_fast = _ema(close, macd_fast)
+    ema_slow = _ema(close, macd_slow)
     macd: List[float] = [
-        (ema12[i] or 0.0) - (ema26[i] or 0.0) for i in range(n)
+        (ema_fast[i] or 0.0) - (ema_slow[i] or 0.0) for i in range(n)
     ]
-    macd_signal = _ema(macd, 9)
+    macd_signal = _ema(macd, max(1, int(th["macd_signal"])))
 
     # MACD triggers
     macd_buy: List[Optional[float]] = [None] * n
@@ -166,14 +253,15 @@ def compute_indicators(
                 if th["macd_sell"] * max_prior < avg3 < max_prior:
                     macd_sell[i] = close[i]
 
-    # RSV = (Close - MIN(Low,9)) / (MAX(High,9) - MIN(Low,9)) * 100
-    low_min9 = _rolling_min(low, 9)
-    high_max9 = _rolling_max(high, 9)
+    # RSV = (Close - MIN(Low,N)) / (MAX(High,N) - MIN(Low,N)) * 100
+    kdj_period = max(2, int(th["kdj_period"]))
+    low_min_n = _rolling_min(low, kdj_period)
+    high_max_n = _rolling_max(high, kdj_period)
     rsv: List[Optional[float]] = [None] * n
     for i in range(n):
-        if low_min9[i] is not None and high_max9[i] is not None:
-            denom = high_max9[i] - low_min9[i]  # type: ignore[operator]
-            rsv[i] = 0.0 if denom == 0 else (close[i] - low_min9[i]) / denom * 100.0  # type: ignore[operator]
+        if low_min_n[i] is not None and high_max_n[i] is not None:
+            denom = high_max_n[i] - low_min_n[i]  # type: ignore[operator]
+            rsv[i] = 50.0 if denom == 0 else (close[i] - low_min_n[i]) / denom * 100.0  # type: ignore[operator]
 
     # K = RSV/3 + Kprev*2/3 ; D = K/3 + Dprev*2/3 ; J = 3K - 2D
     k_values: List[Optional[float]] = [None] * n
@@ -217,7 +305,8 @@ def compute_indicators(
         ):
             kdj_sell[i] = close[i - 1]
 
-    # RSI：%Gain/%Loss -> RS -> RSI(30~70) -> RSI6/RSI14
+    # RSI：%Gain/%Loss -> RS -> RSI(30~70) -> RSI 快/慢平滑
+    rsi_period = max(2, int(th["rsi_period"]))
     gains: List[float] = [0.0] * n
     losses: List[float] = [0.0] * n
     for i in range(1, n):
@@ -228,13 +317,13 @@ def compute_indicators(
 
     rsi: List[Optional[float]] = [None] * n
     for i in range(n):
-        if i < 14:
+        if i < rsi_period:
             rsi[i] = None
             continue
-        sum_gain = sum(gains[i - 14: i])      # SUM(AP[r-14..r-1])
-        sum_loss = sum(losses[i - 14: i])
-        avg_gain = (sum_gain / 14.0 * 13.0 + gains[i]) / 14.0
-        avg_loss = (sum_loss / 14.0 * 13.0 + losses[i]) / 14.0
+        sum_gain = sum(gains[i - rsi_period: i])      # SUM(AP[r-N..r-1])
+        sum_loss = sum(losses[i - rsi_period: i])
+        avg_gain = (sum_gain / rsi_period * (rsi_period - 1.0) + gains[i]) / rsi_period
+        avg_loss = (sum_loss / rsi_period * (rsi_period - 1.0) + losses[i]) / rsi_period
         if avg_loss == 0:
             rsi[i] = 100.0
         else:
@@ -254,8 +343,8 @@ def compute_indicators(
                 out.append(sum(v for v in window if v is not None) / period)
         return out
 
-    rsi6 = _avg_opt(rsi, 6)
-    rsi14 = _avg_opt(rsi, 14)
+    rsi6 = _avg_opt(rsi, max(1, int(th["rsi_smooth_fast"])))
+    rsi14 = _avg_opt(rsi, max(1, int(th["rsi_smooth_slow"])))
 
     rsi_buy: List[Optional[float]] = [None] * n
     rsi_sell: List[Optional[float]] = [None] * n
@@ -275,28 +364,12 @@ def compute_indicators(
         ):
             rsi_sell[i] = close[i - 1]
 
-    # BOLL：BOLU/BOLD = AVERAGE(TP,20) ± 2*STDEV(TP,20)
-    bolu: List[Optional[float]] = [None] * n
-    bold: List[Optional[float]] = [None] * n
-    for i in range(n):
-        if i + 1 < 20:
-            continue
-        window = typical[i + 1 - 20: i + 1]
-        mean = sum(window) / 20.0
-        stdev = statistics.pstdev(window) if len(window) > 1 else 0.0
-        bolu[i] = mean + 2.0 * stdev
-        bold[i] = mean - 2.0 * stdev
-
-    # CCI = (TP - AVERAGE(TP,14)) / (0.015 * AVEDEV(TP,14))
-    cci: List[Optional[float]] = [None] * n
-    for i in range(n):
-        if i + 1 < 14:
-            continue
-        window = typical[i + 1 - 14: i + 1]
-        mean = sum(window) / 14.0
-        avedev = sum(abs(v - mean) for v in window) / 14.0
-        denom = 0.015 * avedev
-        cci[i] = 0.0 if denom == 0 else (typical[i] - mean) / denom
+    # 扩展因子序列（BOLL/CCI/DMI/MFI/量能/52 周位置）。
+    # 公式放在 composite_factors 共享模块，与回测引擎逐位一致（parity）。
+    factor_series = compute_extra_factor_series(close, high, low, volume)
+    bolu = factor_series["bolu"]
+    bold = factor_series["bold"]
+    cci = factor_series["cci"]
 
     # OBV = IF(Volume>OBVprev, OBVprev+Volume, OBVprev-Volume)（Excel 原逻辑）
     obv: List[float] = [0.0] * n
@@ -332,6 +405,227 @@ def compute_indicators(
         ):
             obv_sell[i] = close[i]
 
+    # ---- 复合 BUY/SELL 评分（归一化，不依赖绝对价格量级） ----
+    # 所有判断只使用截止当前 bar 的数据，无未来函数（look-ahead bias）。
+    lookback = max(2, int(th["macd_lookback"]))
+    trend_period = max(2, int(th["trend_period"]))
+    sma_trend = _sma(close, trend_period)
+    buy_threshold = int(th["composite_buy_threshold"])
+    sell_threshold = int(th["composite_sell_threshold"])
+    momentum_period = max(1, int(th["momentum_period"]))
+    momentum_min_change_pct = float(
+        th["momentum_min_change_pct"]
+    )
+
+    # ------------------------------------------------------------
+    # 价格动量 / 动量改善
+    #
+    # momentum_pct:
+    #     近 N 根涨跌幅 ROC（%）。
+    #
+    # momentum_delta:
+    #     ROC 相对上一根 bar 的变化。
+    #
+    # BUY 需同时满足：
+    #     1. 动量正在改善
+    #     2. 当日价格确实在上涨
+    #
+    # SELL 需同时满足：
+    #     1. 动量正在恶化
+    #     2. 当日价格确实在下跌
+    #
+    # 避免在整体下跌的 bar 上，微小的正 ROC 变化自动变成 BUY 加分。
+    # ------------------------------------------------------------
+
+    momentum_pct: List[Optional[float]] = [None] * n
+
+    for i in range(momentum_period, n):
+
+        prev_close = close[i - momentum_period]
+
+        if prev_close == 0:
+            continue
+
+        momentum_pct[i] = (
+            (close[i] - prev_close)
+            / prev_close
+            * 100.0
+        )
+
+    momentum_delta: List[Optional[float]] = [None] * n
+
+    for i in range(1, n):
+
+        if (
+            momentum_pct[i] is None
+            or momentum_pct[i - 1] is None
+        ):
+            continue
+
+        momentum_delta[i] = (
+            momentum_pct[i]
+            - momentum_pct[i - 1]
+        )  # type: ignore[operator]
+
+    buy_score: List[int] = [0] * n
+    sell_score: List[int] = [0] * n
+    buy_signal: List[Optional[float]] = [None] * n
+    sell_signal: List[Optional[float]] = [None] * n
+    buy_breakdown: List[Dict[str, int]] = [{} for _ in range(n)]
+    sell_breakdown: List[Dict[str, int]] = [{} for _ in range(n)]
+
+    # 扩展因子评分器（权重默认 0 → 不贡献分数，与改造前输出一致）
+    extra_scorer = ExtraFactorScorer(factor_series, close, volume, th)
+
+    for i in range(n):
+        bd: Dict[str, int] = {
+            "macd": 0, "kdj": 0, "rsi": 0, "regime": 0, "momentum": 0,
+            **{key: 0 for key in FACTOR_BREAKDOWN_KEYS},
+        }
+        sd: Dict[str, int] = dict(bd)
+        b = 0
+        s = 0
+
+        # MACD 归一化：滚动窗口百分位（仅使用当前 bar 之前的数据，
+        # 且要求完整回看窗口，避免早期样本过少导致百分位失真）
+        if i >= lookback:
+            macd_pct = _percentile_rank(macd[i - lookback:i], macd[i])
+            macd_rising = macd[i] > macd[i - 1]
+            macd_falling = macd[i] < macd[i - 1]
+
+            # 深跌低位 + 向上反转
+            if (
+                macd_pct is not None
+                and macd_pct <= th["macd_low_percentile"]
+                and macd_rising
+            ):
+                bd["macd"] = 2
+                b += 2
+
+            # 高位 + 向下反转
+            if (
+                macd_pct is not None
+                and macd_pct >= th["macd_high_percentile"]
+                and macd_falling
+            ):
+                sd["macd"] = 2
+                s += 2
+
+        # KDJ 超卖金叉 / 超买死叉
+        if i >= 1 and None not in (k_values[i], d_values[i], k_values[i - 1], d_values[i - 1]):
+            golden_cross = (
+                k_values[i] > d_values[i]  # type: ignore[operator]
+                and k_values[i - 1] <= d_values[i - 1]  # type: ignore[operator]
+            )
+            death_cross = (
+                k_values[i] < d_values[i]  # type: ignore[operator]
+                and k_values[i - 1] >= d_values[i - 1]  # type: ignore[operator]
+            )
+            if (
+                k_values[i] < th["kdj_low"]  # type: ignore[operator]
+                and d_values[i] < th["kdj_low"]  # type: ignore[operator]
+                and golden_cross
+            ):
+                bd["kdj"] = 2
+                b += 2
+            if (
+                k_values[i] > th["kdj_high"]  # type: ignore[operator]
+                and d_values[i] > th["kdj_high"]  # type: ignore[operator]
+                and death_cross
+            ):
+                sd["kdj"] = 2
+                s += 2
+
+        # RSI 极端 + 反转（快速平滑 RSI 转向）
+        if i >= 1 and None not in (rsi[i], rsi6[i], rsi6[i - 1]):
+            rsi_turning_up = rsi6[i] > rsi6[i - 1]  # type: ignore[operator]
+            rsi_turning_down = rsi6[i] < rsi6[i - 1]  # type: ignore[operator]
+            if rsi[i] < th["rsi_low"] and rsi_turning_up:  # type: ignore[operator]
+                bd["rsi"] = 2
+                b += 2
+            if rsi[i] > th["rsi_high"] and rsi_turning_down:  # type: ignore[operator]
+                sd["rsi"] = 2
+                s += 2
+
+        # 长期趋势 regime：价格相对趋势均线 + 均线方向（各 0-1 分，BUY/SELL 对称）
+        if sma_trend[i] is not None:
+            if close[i] > sma_trend[i]:  # type: ignore[operator]
+                bd["regime"] += 1
+                b += 1
+            elif close[i] < sma_trend[i]:  # type: ignore[operator]
+                sd["regime"] += 1
+                s += 1
+
+            if i >= 1 and sma_trend[i - 1] is not None:
+                if sma_trend[i] > sma_trend[i - 1]:  # type: ignore[operator]
+                    bd["regime"] += 1
+                    b += 1
+                elif sma_trend[i] < sma_trend[i - 1]:  # type: ignore[operator]
+                    sd["regime"] += 1
+                    s += 1
+
+        # ------------------------------------------------------------
+        # 动量改善 / 恶化
+        #
+        # BUY：ROC 正在改善 且 当日收盘高于昨日收盘
+        # SELL：ROC 正在恶化 且 当日收盘低于昨日收盘
+        # ------------------------------------------------------------
+        delta = momentum_delta[i]
+
+        if delta is not None:
+
+            if (
+                delta > momentum_min_change_pct
+                and i >= 1
+                and close[i] > close[i - 1]
+            ):
+                bd["momentum"] = 2
+                b += 2
+
+            elif (
+                delta < -momentum_min_change_pct
+                and i >= 1
+                and close[i] < close[i - 1]
+            ):
+                sd["momentum"] = 2
+                s += 2
+
+        # 扩展因子（BOLL/CCI/DMI/MFI/量能/52 周位置）：权重 0 时零贡献
+        extra_buy, extra_sell, extra_bd, extra_sd = extra_scorer.score_at(i)
+        b += extra_buy
+        s += extra_sell
+        bd.update(extra_bd)
+        sd.update(extra_sd)
+
+        buy_score[i] = b
+        sell_score[i] = s
+        buy_breakdown[i] = bd
+        sell_breakdown[i] = sd
+
+        # 信号仅在评分“进入”阈值区间的那根 bar 触发，保持图表整洁；
+        # 同一根 bar 买卖同时进入区间时视为方向不明，不产生任何标记。
+        prev_buy = buy_score[i - 1] if i > 0 else 0
+        prev_sell = sell_score[i - 1] if i > 0 else 0
+        buy_enter = b >= buy_threshold and prev_buy < buy_threshold
+        sell_enter = s >= sell_threshold and prev_sell < sell_threshold
+        if buy_enter and not sell_enter:
+            buy_signal[i] = close[i]
+        elif sell_enter and not buy_enter:
+            sell_signal[i] = close[i]
+
+    extra_max = extra_scorer.max_extra()
+    triggers = {
+        "macd_buy": macd_buy,
+        "macd_sell": macd_sell,
+        "kdj_buy": kdj_buy,
+        "kdj_sell": kdj_sell,
+        "rsi_buy": rsi_buy,
+        "rsi_sell": rsi_sell,
+        "obv_buy": obv_buy,
+        "obv_sell": obv_sell,
+    }
+    triggers.update(compute_extra_triggers(factor_series, close, th))
+
     return {
         "dates": dates,
         "close": close,
@@ -350,14 +644,16 @@ def compute_indicators(
         "cci": cci,
         "obv": obv,
         "obv_ma": obv_ma,
-        "triggers": {
-            "macd_buy": macd_buy,
-            "macd_sell": macd_sell,
-            "kdj_buy": kdj_buy,
-            "kdj_sell": kdj_sell,
-            "rsi_buy": rsi_buy,
-            "rsi_sell": rsi_sell,
-            "obv_buy": obv_buy,
-            "obv_sell": obv_sell,
+        "triggers": triggers,
+        "composite": {
+            "buy_score": buy_score,
+            "sell_score": sell_score,
+            "buy_signal": buy_signal,
+            "sell_signal": sell_signal,
+            "buy_breakdown": buy_breakdown,
+            "sell_breakdown": sell_breakdown,
+            # 满分 = 经典 10 分 + 启用扩展因子权重和（默认权重 0 时仍为 10）
+            "max_buy_score": MAX_BUY_SCORE + extra_max,
+            "max_sell_score": MAX_SELL_SCORE + extra_max,
         },
     }

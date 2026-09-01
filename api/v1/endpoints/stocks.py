@@ -20,6 +20,8 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, 
 from api.deps import get_system_config_service
 
 from api.v1.schemas.stocks import (
+    AutoTuneResponse,
+    CompositeSignals,
     ExtractFromImageResponse,
     ExtractItem,
     IndicatorTriggers,
@@ -618,7 +620,7 @@ def get_stock_history(
 def get_stock_indicators(
     stock_code: str,
     period: str = Query("daily", description="K 线周期", pattern="^(daily|weekly|monthly)$"),
-    days: int = Query(365, ge=7, le=365, description="获取天数"),
+    days: int = Query(365, ge=7, le=1825, description="获取天数（最多 5 年）"),
     bol_constant: Optional[float] = Query(None, description="BOL constant 阈值"),
     macd_buy: Optional[float] = Query(None, description="MACD Buy 阈值"),
     macd_sell: Optional[float] = Query(None, description="MACD Sell 阈值"),
@@ -626,8 +628,32 @@ def get_stock_indicators(
     kdj_sell: Optional[float] = Query(None, description="KDJ Sell 阈值"),
     rsi_buy: Optional[float] = Query(None, description="RSI Buy 阈值"),
     rsi_sell: Optional[float] = Query(None, description="RSI Sell 阈值"),
-    optimize: bool = Query(False, description="是否自动调优触发阈值"),
-    trigger: str = Query("macd", pattern="^(macd|kdj|rsi|obv)$", description="调优触发器"),
+    composite_buy_threshold: Optional[float] = Query(None, description="复合 BUY 评分触发阈值"),
+    composite_sell_threshold: Optional[float] = Query(None, description="复合 SELL 评分触发阈值"),
+    macd_lookback: Optional[float] = Query(None, description="MACD 百分位回看窗口"),
+    macd_low_percentile: Optional[float] = Query(None, description="MACD 低位百分位阈值"),
+    macd_high_percentile: Optional[float] = Query(None, description="MACD 高位百分位阈值"),
+    rsi_low: Optional[float] = Query(None, description="RSI 超卖阈值"),
+    rsi_high: Optional[float] = Query(None, description="RSI 超买阈值"),
+    kdj_low: Optional[float] = Query(None, description="KDJ 超卖阈值（复合评分用）"),
+    kdj_high: Optional[float] = Query(None, description="KDJ 超买阈值（复合评分用）"),
+    trend_period: Optional[float] = Query(None, description="长期趋势均线周期"),
+    boll_buy_level: Optional[float] = Query(None, description="BOLL %B 向上穿越的看多水平"),
+    boll_sell_level: Optional[float] = Query(None, description="BOLL %B 向下穿越的看空水平"),
+    boll_weight: Optional[float] = Query(None, description="BOLL %B 因子权重（0 为禁用）"),
+    cci_buy_level: Optional[float] = Query(None, description="CCI 向上穿越的看多水平"),
+    cci_sell_level: Optional[float] = Query(None, description="CCI 向下穿越的看空水平"),
+    cci_weight: Optional[float] = Query(None, description="CCI 因子权重（0 为禁用）"),
+    adx_min_level: Optional[float] = Query(None, description="DMI 触发要求的 ADX 趋势强度下限"),
+    dmi_weight: Optional[float] = Query(None, description="DMI 因子权重（0 为禁用）"),
+    mfi_buy_level: Optional[float] = Query(None, description="MFI 向上穿越的看多水平"),
+    mfi_sell_level: Optional[float] = Query(None, description="MFI 向下穿越的看空水平"),
+    mfi_weight: Optional[float] = Query(None, description="MFI 因子权重（0 为禁用）"),
+    volume_confirm_level: Optional[float] = Query(None, description="量能确认：volume/SMA20(volume) 下限"),
+    volume_weight: Optional[float] = Query(None, description="量能确认因子权重（0 为禁用）"),
+    range52_high_level: Optional[float] = Query(None, description="52 周位置：close/252 日最高 的看多水平"),
+    range52_low_level: Optional[float] = Query(None, description="52 周位置：close/252 日最低 的看空水平"),
+    range52_weight: Optional[float] = Query(None, description="52 周位置因子权重（0 为禁用）"),
     transaction_window: int = Query(7, ge=1, le=365, description="交易窗口天数"),
 ) -> StockIndicatorsResponse:
     """
@@ -670,6 +696,32 @@ def get_stock_indicators(
             "kdj_sell": kdj_sell,
             "rsi_buy": rsi_buy,
             "rsi_sell": rsi_sell,
+            "composite_buy_threshold": composite_buy_threshold,
+            "composite_sell_threshold": composite_sell_threshold,
+            "macd_lookback": macd_lookback,
+            "macd_low_percentile": macd_low_percentile,
+            "macd_high_percentile": macd_high_percentile,
+            "rsi_low": rsi_low,
+            "rsi_high": rsi_high,
+            "kdj_low": kdj_low,
+            "kdj_high": kdj_high,
+            "trend_period": trend_period,
+            "boll_buy_level": boll_buy_level,
+            "boll_sell_level": boll_sell_level,
+            "boll_weight": boll_weight,
+            "cci_buy_level": cci_buy_level,
+            "cci_sell_level": cci_sell_level,
+            "cci_weight": cci_weight,
+            "adx_min_level": adx_min_level,
+            "dmi_weight": dmi_weight,
+            "mfi_buy_level": mfi_buy_level,
+            "mfi_sell_level": mfi_sell_level,
+            "mfi_weight": mfi_weight,
+            "volume_confirm_level": volume_confirm_level,
+            "volume_weight": volume_weight,
+            "range52_high_level": range52_high_level,
+            "range52_low_level": range52_low_level,
+            "range52_weight": range52_weight,
         }
         thresholds = dict(DEFAULT_THRESHOLDS)
         for key, value in overrides.items():
@@ -678,14 +730,6 @@ def get_stock_indicators(
 
         bars = result.get("data", [])
         computed = compute_indicators(bars, thresholds)
-        optimization = None
-        benefit_series = []
-        if optimize and bars:
-            from src.services.indicator_optimizer import optimize_indicator_thresholds
-            optimization = optimize_indicator_thresholds(bars, trigger, transaction_window)
-            thresholds = optimization["thresholds"]
-            computed = compute_indicators(bars, thresholds)
-            benefit_series = optimization["benefit_series"]
 
         from src.services.indicator_optimizer import calculate_trigger_benefits
         trigger_benefits = calculate_trigger_benefits(computed, transaction_window)
@@ -725,8 +769,8 @@ def get_stock_indicators(
             obv=trim_series(computed["obv"]),
             obv_ma=trim_series(computed["obv_ma"]),
             triggers=IndicatorTriggers(**trim_series(computed["triggers"])),
+            composite=CompositeSignals(**trim_series(computed["composite"])),
             thresholds=thresholds,
-            benefit_series=benefit_series[visible_start:] if benefit_series else [],
             benefit_series_by_trigger={
                 key: value["benefit_series"][visible_start:]
                 for key, value in trigger_benefits.items()
@@ -735,7 +779,6 @@ def get_stock_indicators(
                 key: value["accumulated_benefit_pct"]
                 for key, value in trigger_benefits.items()
             },
-            optimization=optimization,
         )
 
     except ValueError as e:
@@ -753,5 +796,119 @@ def get_stock_indicators(
             detail={
                 "error": "internal_error",
                 "message": f"获取技术指标失败: {str(e)}"
+            }
+        )
+
+
+@router.get(
+    "/{stock_code}/auto-tune",
+    response_model=AutoTuneResponse,
+    responses={
+        200: {"description": "Auto Tune 参数寻优结果"},
+        422: {"description": "历史数据不足", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="Auto Tune 参数寻优",
+    description=(
+        "基于最多 20 年日线历史，对复合评分阈值做多代际（A 基线 / B 趋势过滤 / "
+        "C ATR 风控 / D 归一化评分 / E 多因子评分 / F 多因子+风控）训练/验证/测试寻优，"
+        "测试段长度可选（1-5 年，默认 5 年），训练段范围可用日期裁剪，"
+        "目标函数平衡收益、回撤、Sharpe、交易质量与信号频率，"
+        "推荐参数可直接应用到图表指标。"
+        "附三个同窗口基准（标普500 买入持有 / 个股买入持有 / "
+        "推荐策略时点套用标普500）；税后指标按美国资本利得税近似，"
+        "税率按持仓时长区分短期/长期（默认按家庭应税收入约 40 万美元档）。"
+    ),
+)
+def auto_tune_stock(
+    stock_code: str,
+    window_days: int = Query(90, ge=10, le=365, description="两次买入之间的最小间隔天数"),
+    years: float = Query(10.0, ge=3.0, le=20.0, description="回测历史年数"),
+    test_years: float = Query(3.0, ge=1.0, le=5.0, description="样本外测试段年数（从历史尾部预留）"),
+    train_start_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="训练段起始日期（可选裁剪）"),
+    train_end_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="训练段结束日期（可选裁剪）"),
+    fine_tune_window_days: Optional[int] = Query(None, ge=60, le=3000, description="Fine Tune 滑动训练窗口天数（可选）"),
+) -> AutoTuneResponse:
+    """
+    Auto Tune 参数寻优
+
+    流程：历史数据 -> 训练集寻优 -> 验证集选型 -> 测试集仅报告，
+    避免用测试期选择参数，也避免只按历史收益最大化选参。
+    测试段长度由 test_years 指定（默认 5 年），训练/验证在剩余
+    历史按 60:20 相对比例划分；train_start_date/train_end_date
+    可选，用于把训练段裁剪到指定日期范围。
+    附三个同窗口基准（标普500 买入持有 / 个股买入持有 /
+    推荐策略时点套用标普500），税后指标按美国资本利得税近似
+    （短期/长期税率按持仓时长区分）。
+
+    Args:
+        stock_code: 股票代码
+        window_days: 两次买入之间的最小间隔天数（默认 90）
+        years: 回测历史年数（默认 10 年，最多 20 年）
+        test_years: 样本外测试段年数（默认 5 年）
+        train_start_date: 训练段起始日期（可选）
+        train_end_date: 训练段结束日期（可选）
+        fine_tune_window_days: Fine Tune 滑动训练窗口天数（可选）
+
+    Returns:
+        AutoTuneResponse: 六代策略对比（A–F）、基准对比与推荐参数
+    """
+    try:
+        service = StockService()
+        # get_daily_data(days=N) 的 N 约为交易日数的一半（内部换算日历区间），
+        # 因此取 years*365/2 + 30 以覆盖完整历史。
+        fetch_days = int(years * 365 / 2) + 30
+        result = service.get_history_data(
+            stock_code=stock_code,
+            period="daily",
+            days=fetch_days,
+        )
+
+        bars = result.get("data", [])
+        from src.services.indicator_optimizer import (
+            BENCHMARK_INDEX_CODE,
+            run_auto_tune,
+        )
+        # 标普500 基准数据 best-effort 获取，缺失时对应基准标记为不可用
+        try:
+            bench_result = service.get_history_data(
+                stock_code=BENCHMARK_INDEX_CODE,
+                period="daily",
+                days=fetch_days,
+            )
+            benchmark_bars = bench_result.get("data", [])
+            if len(benchmark_bars) < 100:
+                benchmark_bars = None
+        except Exception as e:
+            logger.warning(f"获取标普500 基准数据失败，跳过相关基准: {e}")
+            benchmark_bars = None
+
+        report = run_auto_tune(
+            bars,
+            window_days=window_days,
+            history_years=years,
+            benchmark_bars=benchmark_bars,
+            test_years=test_years,
+            train_start_date=train_start_date,
+            train_end_date=train_end_date,
+            fine_tune_window_days=fine_tune_window_days,
+        )
+        return AutoTuneResponse(**report)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "insufficient_history",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        logger.error(f"Auto Tune 失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"Auto Tune 失败: {str(e)}"
             }
         )

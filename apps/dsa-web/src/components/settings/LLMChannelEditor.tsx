@@ -432,6 +432,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
   const selectedCapabilities = capabilityState?.selected || [];
   const capabilityResults = capabilityState?.results || {};
   const capabilityBusy = capabilityState?.status === 'loading';
+  const isOllamaChannel = channel.protocol === 'ollama';
   const channelNameInputId = `llm-channel-${channel.id}-name`;
   const protocolInputId = `llm-channel-${channel.id}-protocol`;
   const apiSurfaceInputId = `llm-channel-${channel.id}-api-surface`;
@@ -769,7 +770,9 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
               disabled={busy}
               onClick={() => onTest(channel, index)}
             >
-              {testState?.status === 'loading' ? '测试中...' : '测试连接'}
+              {testState?.status === 'loading'
+                ? (isOllamaChannel ? '激活中...' : '测试中...')
+                : (isOllamaChannel ? '激活 Ollama' : '测试连接')}
             </Button>
             {testState?.text ? (
               <div className="space-y-1">
@@ -785,7 +788,9 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
                 </span>
                 {selectedModels[0] ? (
                   <p className="text-[11px] text-secondary-text">
-                    基础连接测试默认使用模型列表首项：{selectedModels[0]}
+                    {isOllamaChannel
+                      ? `激活会向首个模型发送测试请求，首次加载可能需要一些时间：${selectedModels[0]}`
+                      : `基础连接测试默认使用模型列表首项：${selectedModels[0]}`}
                   </p>
                 ) : null}
                 {testState.hint ? (
