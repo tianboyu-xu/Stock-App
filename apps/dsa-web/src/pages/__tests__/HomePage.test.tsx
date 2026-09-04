@@ -436,6 +436,323 @@ describe('HomePage', () => {
     expect(screen.getByText('暂无个股记录')).toBeInTheDocument();
   });
 
+  it('shows the summary board and opens a stock like a watchlist item', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+    vi.mocked(systemConfigApi.getWatchlist).mockResolvedValue(['600519']);
+    vi.mocked(historyApi.getStockBarList).mockResolvedValue({
+      total: 1,
+      items: [
+        {
+          id: 7,
+          stockCode: '600519',
+          stockName: '贵州茅台',
+          reportType: 'detailed',
+          sentimentScore: 60,
+          operationAdvice: '观察',
+          analysisCount: 1,
+          lastAnalysisTime: '2026-01-01T09:00:00+08:00',
+        },
+      ],
+    });
+    const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+    const todayMs = new Date(`${todayKey}T00:00:00Z`).getTime();
+    const dayKey = (daysAgo: number) => new Date(todayMs - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const dates = [dayKey(2), dayKey(1), dayKey(0)];
+    vi.mocked(stocksApi.getIndicators).mockImplementation(async (code: string) => ({
+      stockCode: code,
+      stockName: code,
+      period: 'daily',
+      dates,
+      close: [100, 101, 102],
+      sma: {},
+      ema: {},
+      macd: [0, 0, 0],
+      macdSignal: [0, 0, 0],
+      k: [50, 50, 50],
+      d: [50, 50, 50],
+      j: [50, 50, 50],
+      rsi: [50, 50, 50],
+      rsi6: [50, 50, 50],
+      rsi14: [50, 50, 50],
+      bolu: [110, 110, 110],
+      bold: [90, 90, 90],
+      cci: [0, 0, 0],
+      obv: [1000, 1000, 1000],
+      obvMa: {},
+      triggers: {
+        macdBuy: [null, null, null],
+        macdSell: [null, null, null],
+        kdjBuy: [null, null, null],
+        kdjSell: [null, null, null],
+        rsiBuy: [null, null, null],
+        rsiSell: [null, null, null],
+        obvBuy: [null, null, null],
+        obvSell: [null, null, null],
+      },
+      composite: {
+        buyScore: [0, 0, 7],
+        sellScore: [0, 0, 0],
+        buySignal: [null, null, 102],
+        sellSignal: [null, null, null],
+        buyBreakdown: [],
+        sellBreakdown: [],
+      },
+      thresholds: {
+        bolConstant: 0.1,
+        macdBuy: 0.7,
+        macdSell: 0.99,
+        kdjBuy: 40,
+        kdjSell: 70,
+        rsiBuy: 10,
+        rsiSell: 70,
+        compositeBuyThreshold: 6,
+        compositeSellThreshold: 6,
+        macdLookback: 120,
+        macdLowPercentile: 15,
+        macdHighPercentile: 85,
+        rsiLow: 15,
+        rsiHigh: 85,
+        kdjLow: 40,
+        kdjHigh: 70,
+        trendPeriod: 200,
+      },
+    }));
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('signal-summary-board')).toBeInTheDocument();
+    expect(vi.mocked(stocksApi.getIndicators)).toHaveBeenCalledWith(
+      '600519',
+      expect.objectContaining({ period: 'daily', days: 30 }),
+    );
+    const summaryButton = await screen.findByRole('button', { name: '从摘要打开 600519 最新分析详情' });
+    expect(summaryButton.textContent).toContain('600519');
+    expect(summaryButton.textContent).not.toContain('贵州茅台');
+    expect(summaryButton.getAttribute('style')).toContain('--success');
+
+    fireEvent.click(summaryButton);
+
+    await waitFor(() => {
+      expect(historyApi.getDetail).toHaveBeenCalledWith(7);
+    });
+    expect(await screen.findByText('趋势维持强势')).toBeInTheDocument();
+  });
+
+  it('shows all summary stocks as code-only items without a scrollbar', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+    vi.mocked(systemConfigApi.getWatchlist).mockResolvedValue(['600519', '00700']);
+    vi.mocked(historyApi.getStockBarList).mockResolvedValue({ total: 0, items: [] });
+    const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+    const todayMs = new Date(`${todayKey}T00:00:00Z`).getTime();
+    const dayKey = (daysAgo: number) => new Date(todayMs - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const dates = [dayKey(6), dayKey(5), dayKey(0)];
+    vi.mocked(stocksApi.getIndicators).mockImplementation(async (code: string) => ({
+      stockCode: code,
+      stockName: code,
+      period: 'daily',
+      dates,
+      close: [100, 101, 102],
+      sma: {},
+      ema: {},
+      macd: [0, 0, 0],
+      macdSignal: [0, 0, 0],
+      k: [50, 50, 50],
+      d: [50, 50, 50],
+      j: [50, 50, 50],
+      rsi: [50, 50, 50],
+      rsi6: [50, 50, 50],
+      rsi14: [50, 50, 50],
+      bolu: [110, 110, 110],
+      bold: [90, 90, 90],
+      cci: [0, 0, 0],
+      obv: [1000, 1000, 1000],
+      obvMa: {},
+      triggers: {
+        macdBuy: [null, null, null],
+        macdSell: [null, null, null],
+        kdjBuy: [null, null, null],
+        kdjSell: [null, null, null],
+        rsiBuy: [null, null, null],
+        rsiSell: [null, null, null],
+        obvBuy: [null, null, null],
+        obvSell: [null, null, null],
+      },
+      composite: {
+        buyScore: [0, 0, 0],
+        sellScore: [0, 7, 0],
+        buySignal: [null, null, null],
+        sellSignal: [null, 101, null],
+        buyBreakdown: [],
+        sellBreakdown: [],
+      },
+      thresholds: {
+        bolConstant: 0.1,
+        macdBuy: 0.7,
+        macdSell: 0.99,
+        kdjBuy: 40,
+        kdjSell: 70,
+        rsiBuy: 10,
+        rsiSell: 70,
+        compositeBuyThreshold: 6,
+        compositeSellThreshold: 6,
+        macdLookback: 120,
+        macdLowPercentile: 15,
+        macdHighPercentile: 85,
+        rsiLow: 15,
+        rsiHigh: 85,
+        kdjLow: 40,
+        kdjHigh: 70,
+        trendPeriod: 200,
+      },
+    }));
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    const items = await screen.findByTestId('signal-summary-items');
+    expect(items.children).toHaveLength(2);
+    expect(items.className).not.toContain('overflow');
+    const sellButton = await screen.findByRole('button', { name: '摘要中暂无 600519 的分析详情，可先分析' });
+    expect(sellButton.getAttribute('style')).toContain('--destructive');
+  });
+
+  it('refetches the summary with fresh thresholds after a threshold change', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+    vi.mocked(systemConfigApi.getWatchlist).mockResolvedValue(['600519']);
+    vi.mocked(historyApi.getStockBarList).mockResolvedValue({ total: 0, items: [] });
+    const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
+    const todayMs = new Date(`${todayKey}T00:00:00Z`).getTime();
+    const dayKey = (daysAgo: number) => new Date(todayMs - daysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const dates = [dayKey(2), dayKey(1), dayKey(0)];
+    const baseThresholds = {
+      bolConstant: 0.1,
+      macdBuy: 0.7,
+      macdSell: 0.99,
+      kdjBuy: 40,
+      kdjSell: 70,
+      rsiBuy: 10,
+      rsiSell: 70,
+      compositeBuyThreshold: 6,
+      compositeSellThreshold: 6,
+      macdLookback: 120,
+      macdLowPercentile: 15,
+      macdHighPercentile: 85,
+      rsiLow: 15,
+      rsiHigh: 85,
+      kdjLow: 40,
+      kdjHigh: 70,
+      trendPeriod: 200,
+    };
+    vi.mocked(stocksApi.getIndicators).mockImplementation(async (code: string) => ({
+      stockCode: code,
+      stockName: code,
+      period: 'daily',
+      dates,
+      close: [100, 101, 102],
+      sma: {},
+      ema: {},
+      macd: [0, 0, 0],
+      macdSignal: [0, 0, 0],
+      k: [50, 50, 50],
+      d: [50, 50, 50],
+      j: [50, 50, 50],
+      rsi: [50, 50, 50],
+      rsi6: [50, 50, 50],
+      rsi14: [50, 50, 50],
+      bolu: [110, 110, 110],
+      bold: [90, 90, 90],
+      cci: [0, 0, 0],
+      obv: [1000, 1000, 1000],
+      obvMa: {},
+      triggers: {
+        macdBuy: [null, null, null],
+        macdSell: [null, null, null],
+        kdjBuy: [null, null, null],
+        kdjSell: [null, null, null],
+        rsiBuy: [null, null, null],
+        rsiSell: [null, null, null],
+        obvBuy: [null, null, null],
+        obvSell: [null, null, null],
+      },
+      composite: {
+        buyScore: [0, 0, 7],
+        sellScore: [0, 0, 0],
+        buySignal: [null, null, 102],
+        sellSignal: [null, null, null],
+        buyBreakdown: [],
+        sellBreakdown: [],
+      },
+      thresholds: baseThresholds,
+    }));
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('signal-summary-board')).toBeInTheDocument();
+    const summaryCalls = () => vi.mocked(stocksApi.getIndicators).mock.calls.filter(
+      (call) => call[0] === '600519' && (call[1] as { days?: number })?.days === 30,
+    );
+    const initialCount = summaryCalls().length;
+    expect(initialCount).toBeGreaterThan(0);
+
+    // Simulate the user saving new thresholds in the chart: the summary
+    // refetch must carry the updated stored thresholds.
+    window.localStorage.setItem(
+      'dsa.indicator.thresholds.600519',
+      JSON.stringify({ ...baseThresholds, compositeBuyThreshold: 5 }),
+    );
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('dsa-indicator-thresholds-changed', { detail: { stockCode: '600519' } }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(summaryCalls().length).toBeGreaterThan(initialCount);
+    });
+    const lastArgs = summaryCalls().at(-1)?.[1] as Record<string, unknown>;
+    expect(lastArgs.compositeBuyThreshold).toBe(5);
+
+    // Threshold changes for stocks outside the watchlist must not refetch.
+    const callsBefore = summaryCalls().length;
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('dsa-indicator-thresholds-changed', { detail: { stockCode: 'AAPL' } }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+    });
+    expect(summaryCalls().length).toBe(callsBefore);
+  });
+
   it('opens the run-flow drawer from an active task in TaskPanel', async () => {
     vi.mocked(historyApi.getList).mockResolvedValue({
       total: 0,

@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { historyApi } from '../api/history';
+import { stocksApi, type StockIndicatorsResponse } from '../api/stocks';
 import { agentApi, type SkillInfo } from '../api/agent';
 import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, Drawer, EmptyState, InlineAlert } from '../components/common';
@@ -16,6 +17,7 @@ import { MarketReviewReportView } from '../components/report/MarketReviewReportV
 import { MarketReviewRegionSelector } from '../components/market-review/MarketReviewRegionSelector';
 import { ReportSummary } from '../components/report/ReportSummary';
 import { RunFlowPanel } from '../components/run-flow';
+import { SignalSummaryBoard } from '../components/summary';
 import { TaskPanel } from '../components/tasks';
 import {
   HomeStockWorkspace,
@@ -38,6 +40,17 @@ import type {
 } from '../types/analysis';
 import type { RunFlowSnapshotSource } from '../types/runFlow';
 import { getTodayInShanghai } from '../utils/format';
+import {
+  buildCompositeSummaryEntries,
+  COMPOSITE_SUMMARY_FETCH_DAYS,
+  type CompositeSummaryEntry,
+  type CompositeTriggerInput,
+} from '../utils/compositeSummary';
+import {
+  INDICATOR_THRESHOLDS_CHANGED_EVENT,
+  readStoredIndicatorThresholds,
+  type IndicatorThresholdsChangedDetail,
+} from '../utils/indicatorThresholds';
 import { normalizeStockCode } from '../utils/stockCode';
 
 type MarketReviewNotice = {
@@ -62,6 +75,10 @@ const DUPLICATE_BANNER_AUTO_DISMISS_MS = 5000;
 const BATCH_ANALYSIS_CHUNK_SIZE = 50;
 const TODAY_ANALYSIS_PAGE_SIZE = 100;
 const WATCHLIST_HISTORY_LOOKUP_CONCURRENCY = 4;
+const SUMMARY_COMPOSITE_LOOKUP_CONCURRENCY = 4;
+// Threshold inputs notify per keystroke; wait for a pause before refetching
+// the Summary board so one edit triggers one refresh.
+const SUMMARY_THRESHOLD_REFRESH_DEBOUNCE_MS = 800;
 const TASK_PANEL_COLLAPSED_STORAGE_KEY = 'dsa.home.taskPanelCollapsed';
 const SERVER_LOCAL_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 
@@ -81,6 +98,50 @@ type WatchlistHistoryLookupResult = {
   item: HistoryItem | null;
   failed: boolean;
 };
+
+type SummaryCompositeLookupResult = {
+  code: string;
+  payload: CompositeTriggerInput | null;
+  failed: boolean;
+};
+
+async function lookupSummaryCompositeTriggers(
+  codes: string[],
+  isCanceled: () => boolean,
+): Promise<SummaryCompositeLookupResult[]> {
+  const results: Array<SummaryCompositeLookupResult | undefined> = new Array(codes.length);
+  let nextIndex = 0;
+
+  const runWorker = async () => {
+    while (!isCanceled()) {
+      const index = nextIndex;
+      if (index >= codes.length) {
+        return;
+      }
+      nextIndex += 1;
+      const code = codes[index];
+      try {
+        const storedThresholds = readStoredIndicatorThresholds(code);
+        const response: StockIndicatorsResponse = await stocksApi.getIndicators(code, {
+          period: 'daily',
+          days: COMPOSITE_SUMMARY_FETCH_DAYS,
+          ...(storedThresholds ?? {}),
+        });
+        results[index] = {
+          code,
+          payload: { dates: response.dates ?? [], composite: response.composite ?? null },
+          failed: false,
+        };
+      } catch {
+        results[index] = { code, payload: null, failed: true };
+      }
+    }
+  };
+
+  const workerCount = Math.min(SUMMARY_COMPOSITE_LOOKUP_CONCURRENCY, codes.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results.filter((entry): entry is SummaryCompositeLookupResult => entry !== undefined);
+}
 
 async function lookupWatchlistHistory(
   codes: string[],
@@ -278,6 +339,9 @@ const HomePage: React.FC = () => {
   const [isLoadingTodayAnalysisItems, setIsLoadingTodayAnalysisItems] = useState(false);
   const [todayAnalysisLoadFailed, setTodayAnalysisLoadFailed] = useState(false);
   const [todayAnalysisRefreshVersion, setTodayAnalysisRefreshVersion] = useState(0);
+  const [recentSignals, setRecentSignals] = useState<Record<string, CompositeTriggerInput>>({});
+  const [recentSignalsState, setRecentSignalsState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [recentSignalsRefreshVersion, setRecentSignalsRefreshVersion] = useState(0);
   const [isStockBarInitialLoadSettled, setIsStockBarInitialLoadSettled] = useState(false);
   const [completedTaskRefreshPendingCounts, setCompletedTaskRefreshPendingCounts] = useState<Map<string, number>>(
     new Map(),
@@ -811,6 +875,13 @@ const HomePage: React.FC = () => {
     setSidebarOpen(false);
   }, [clearMarketReviewState, selectHistoryItem]);
 
+  const handleSummaryStockSelect = useCallback((entry: CompositeSummaryEntry) => {
+    if (typeof entry.recordId !== 'number') {
+      return;
+    }
+    handleHistoryItemClick(entry.recordId);
+  }, [handleHistoryItemClick]);
+
   const handleRefreshWatchlist = useCallback(async () => {
     await Promise.all([
       refreshWatchlist(),
@@ -1179,6 +1250,106 @@ const HomePage: React.FC = () => {
     watchlistState.watchlistCodes,
   ]);
 
+  useEffect(() => {
+    let active = true;
+    const codes = watchlistState.watchlistCodes
+      .map((code) => (code ?? '').trim())
+      .filter((code) => code.length > 0 && getStockCodeKey(code) !== 'MARKET');
+
+    const loadCompositeTriggers = async () => {
+      setRecentSignalsState('loading');
+      if (codes.length === 0) {
+        if (!active) {
+          return;
+        }
+        setRecentSignals({});
+        setRecentSignalsState('ready');
+        return;
+      }
+      try {
+        const results = await lookupSummaryCompositeTriggers(codes, () => !active);
+        if (!active) {
+          return;
+        }
+        const triggers: Record<string, CompositeTriggerInput> = {};
+        let failedCount = 0;
+        for (const result of results) {
+          if (result.failed || !result.payload) {
+            failedCount += 1;
+            continue;
+          }
+          triggers[result.code] = result.payload;
+        }
+        setRecentSignals(triggers);
+        setRecentSignalsState(failedCount >= codes.length ? 'failed' : 'ready');
+      } catch {
+        if (!active) {
+          return;
+        }
+        setRecentSignals({});
+        setRecentSignalsState('failed');
+      }
+    };
+
+    void loadCompositeTriggers();
+
+    return () => {
+      active = false;
+    };
+  }, [recentSignalsRefreshVersion, watchlistState.watchlistCodes]);
+
+  // Refresh the Summary board live when indicator thresholds change (chart
+  // edits, auto-tune apply, restore defaults). Debounced because threshold
+  // inputs notify per keystroke; only refresh for stocks in the watchlist.
+  useEffect(() => {
+    let timer: number | null = null;
+    const handleThresholdsChanged = (event: Event) => {
+      const changedCode = (event as CustomEvent<IndicatorThresholdsChangedDetail>).detail?.stockCode;
+      if (!changedCode) {
+        return;
+      }
+      const changedKey = getStockCodeKey(changedCode);
+      const isWatched = watchlistState.watchlistCodes.some(
+        (code) => getStockCodeKey(code) === changedKey,
+      );
+      if (!isWatched) {
+        return;
+      }
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      timer = window.setTimeout(() => {
+        timer = null;
+        setRecentSignalsRefreshVersion((version) => version + 1);
+      }, SUMMARY_THRESHOLD_REFRESH_DEBOUNCE_MS);
+    };
+    window.addEventListener(INDICATOR_THRESHOLDS_CHANGED_EVENT, handleThresholdsChanged);
+    return () => {
+      window.removeEventListener(INDICATOR_THRESHOLDS_CHANGED_EVENT, handleThresholdsChanged);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [watchlistState.watchlistCodes]);
+
+  const summaryEntries = useMemo(
+    () => buildCompositeSummaryEntries({
+      codes: watchlistState.watchlistCodes
+        .map((code) => (code ?? '').trim())
+        .filter((code) => code.length > 0 && getStockCodeKey(code) !== 'MARKET'),
+      triggers: recentSignals,
+      recordIds: Object.fromEntries(watchlistRows.map((row) => [
+        row.code,
+        typeof row.latestItem?.id === 'number' ? row.latestItem.id : null,
+      ])),
+      todayKey: todayDateKey,
+    }),
+    [recentSignals, todayDateKey, watchlistRows, watchlistState.watchlistCodes],
+  );
+
+  const isSummarySettled = recentSignalsState !== 'loading' && !watchlistState.isLoading;
+  const showHomeEmptyState = isSummarySettled && summaryEntries.length === 0;
+
   const watchlistAnalyzedTodayCount = useMemo(
     () => watchlistRows.filter((row) => row.analyzedToday).length,
     [watchlistRows],
@@ -1438,6 +1609,78 @@ const HomePage: React.FC = () => {
     ],
   );
 
+  const reportActionButtons = !isMarketReviewHistoryReport ? (
+    <>
+      <Button
+        variant="home-action-ai"
+        size="sm"
+        disabled={isAnalyzing || selectedReport?.meta.id === undefined}
+        onClick={handleReanalyze}
+      >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        {t('home.reanalyze')}
+      </Button>
+      <Button
+        variant="home-action-ai"
+        size="sm"
+        disabled={selectedReport?.meta.id === undefined}
+        onClick={handleAskFollowUp}
+      >
+        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+        </svg>
+        {t('home.askAi')}
+      </Button>
+    </>
+  ) : (
+    <Button
+      variant="home-action-ai"
+      size="sm"
+      disabled={isSubmittingMarketReview}
+      isLoading={isSubmittingMarketReview}
+      loadingText={t('home.submitMarketReview')}
+      onClick={() => void handleTriggerMarketReview()}
+    >
+      <BarChart3 className="h-4 w-4" />
+      {t('home.rerunMarketReview')}
+    </Button>
+  );
+
+  const historyTrendButton = (
+    <Button
+      variant="home-action-ai"
+      size="sm"
+      disabled={selectedReport?.meta.id === undefined || isHistoryTrendUnavailable}
+      className={isHistoryTrendOpen ? 'border-primary/70 bg-primary/15 text-primary shadow-glow-cyan' : undefined}
+      onClick={() => {
+        if (isHistoryTrendOpen) {
+          closeHistoryTrend();
+          return;
+        }
+        void openHistoryTrend();
+      }}
+    >
+      <BarChart3 className="h-4 w-4" />
+      {t('home.historyTrend')}
+    </Button>
+  );
+
+  const fullReportButton = (
+    <Button
+      variant="home-action-ai"
+      size="sm"
+      disabled={selectedReport?.meta.id === undefined}
+      onClick={openMarkdownDrawer}
+    >
+      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+      </svg>
+      {t('home.fullReport')}
+    </Button>
+  );
+
   return (
     <div
       data-testid="home-dashboard"
@@ -1446,7 +1689,7 @@ const HomePage: React.FC = () => {
       <div className="flex-1 flex flex-col min-h-0 min-w-0 w-full">
         <header className="relative z-30 flex min-w-0 flex-shrink-0 items-center overflow-visible px-3 py-3 md:px-4 md:py-4">
           <div className="flex min-w-0 flex-1 flex-col gap-2.5 md:flex-row md:items-center">
-            <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5 md:max-w-md">
               <button
                 onClick={() => setSidebarOpen(true)}
                 className="md:hidden -ml-1 flex-shrink-0 rounded-lg p-1.5 text-secondary-text transition-colors hover:bg-hover hover:text-foreground"
@@ -1568,6 +1811,13 @@ const HomePage: React.FC = () => {
                 )}
               </button>
             </div>
+            {!marketReviewReport && selectedReport ? (
+              <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 md:ml-auto">
+                {reportActionButtons}
+                {historyTrendButton}
+                {fullReportButton}
+              </div>
+            ) : null}
           </div>
         </header>
 
@@ -1686,79 +1936,23 @@ const HomePage: React.FC = () => {
                 onDismiss={clearError}
               />
             ) : null}
+
+            <SignalSummaryBoard
+              entries={summaryEntries}
+              isLoading={recentSignalsState === 'loading' || watchlistState.isLoading}
+              signalsUnavailable={recentSignalsState === 'failed'}
+              onRetry={() => setRecentSignalsRefreshVersion((version) => version + 1)}
+              onStockSelect={handleSummaryStockSelect}
+              selectedRecordId={selectedReport?.meta.id}
+              selectedStockCode={selectedReport?.meta.stockCode}
+            />
+
             {!marketReviewReport && isLoadingReport ? (
               <div className="flex h-full flex-col items-center justify-center">
                 <DashboardStateBlock title={t('home.loadingReport')} loading />
               </div>
             ) : !marketReviewReport && selectedReport ? (
               <div className="w-full space-y-4 pb-8">
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  {!isMarketReviewHistoryReport ? (
-                    <>
-                      <Button
-                        variant="home-action-ai"
-                        size="sm"
-                        disabled={isAnalyzing || selectedReport.meta.id === undefined}
-                        onClick={handleReanalyze}
-                      >
-                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                        {t('home.reanalyze')}
-                      </Button>
-                      <Button
-                        variant="home-action-ai"
-                        size="sm"
-                        disabled={selectedReport.meta.id === undefined}
-                        onClick={handleAskFollowUp}
-                      >
-                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                        {t('home.askAi')}
-                      </Button>
-                    </>
-                  ) : (
-                    <Button
-                      variant="home-action-ai"
-                      size="sm"
-                      disabled={isSubmittingMarketReview}
-                      isLoading={isSubmittingMarketReview}
-                      loadingText={t('home.submitMarketReview')}
-                      onClick={() => void handleTriggerMarketReview()}
-                    >
-                      <BarChart3 className="h-4 w-4" />
-                      {t('home.rerunMarketReview')}
-                    </Button>
-                  )}
-                  <Button
-                    variant="home-action-ai"
-                    size="sm"
-                    disabled={selectedReport.meta.id === undefined || isHistoryTrendUnavailable}
-                    className={isHistoryTrendOpen ? 'border-primary/70 bg-primary/15 text-primary shadow-glow-cyan' : undefined}
-                    onClick={() => {
-                      if (isHistoryTrendOpen) {
-                        closeHistoryTrend();
-                        return;
-                      }
-                      void openHistoryTrend();
-                    }}
-                  >
-                    <BarChart3 className="h-4 w-4" />
-                    {t('home.historyTrend')}
-                  </Button>
-                  <Button
-                    variant="home-action-ai"
-                    size="sm"
-                    disabled={selectedReport.meta.id === undefined}
-                    onClick={openMarkdownDrawer}
-                  >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    {t('home.fullReport')}
-                  </Button>
-                </div>
                 {priceHistoryCode ? (
                   <StockIndicatorChart
                     key={`indicator-${priceHistoryCode}`}
@@ -1797,7 +1991,7 @@ const HomePage: React.FC = () => {
                   />
                 )}
               </div>
-            ) : !marketReviewReport ? (
+            ) : !marketReviewReport && showHomeEmptyState ? (
               <div className="flex h-full items-center justify-center">
                 <EmptyState
                   title={t('home.startAnalysisTitle')}

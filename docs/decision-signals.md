@@ -167,6 +167,7 @@ Web 入口位于 `/decision-signals`：
 - Web 只能把信号标记为 `closed`、`invalidated` 或 `archived`，不提供 terminal 状态恢复为 active。
 - 历史报告详情不再内嵌展示报告绑定的 `source_type=analysis` 信号，也不会因打开报告详情触发 `source_report_id` 信号查询；需要查看报告来源信号时统一进入 `/decision-signals` 页面按来源报告 ID 精确筛选，或打开 `/decision-signals?sourceReportId=<recordId>` deep link。该筛选和 deep link 都会使用 `source_type=analysis + source_report_id` 的精确查询，以保留旧报告的 best-effort 懒回填入口。
 - 持仓页异步查询每个唯一持仓的 latest active 信号，单只查询失败只显示降级提示，不阻断组合快照或其他持仓信号。
+- 首页新增“摘要”看板（默认视图，位于价格图上方）：逐只自选股查询指标接口（`GET /api/v1/stocks/{code}/indicators?days=30`，与技术指标图同一阈值语义，优先使用各股票已保存的阈值），取 `composite.buySignal/sellSignal` 序列的最近触发；7 天内触发用浅绿/浅红标注，3 天内用加粗绿/红标注，无触发保持默认色。摘要项为仅展示股票代码的卡片（无公司名），全部平铺展示无滚动条；点击卡片等同于点击自选股记录，打开最新分析详情。单只股票指标查询失败时该卡片保持无色降级，全部失败时显示降级提示与重试按钮，不影响首页其余功能。技术指标图保存阈值（手动修改 / 应用 Auto Tune 参数 / 恢复默认）后会通过 `dsa-indicator-thresholds-changed` 事件通知首页，自选股阈值变化经防抖后自动按新阈值重查并更新摘要颜色。
 
 所有用户可见枚举必须使用 i18n 标签；技术 ID、股票代码、API 字段名、env key、URL 示例可以保留英文。
 

@@ -2,6 +2,13 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
 import type { UiTextKey } from '../../i18n/uiText';
+import {
+  DEFAULT_INDICATOR_THRESHOLDS,
+  normalizeIndicatorThresholds,
+  notifyIndicatorThresholdsChanged,
+  readStoredIndicatorThresholds,
+  writeStoredIndicatorThresholds,
+} from '../../utils/indicatorThresholds';
 import { Button, Card } from '../common';
 import { DashboardStateBlock } from '../dashboard';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
@@ -124,98 +131,22 @@ const BUY = '#1faa3a';
 const SELL = '#d62728';
 
 // Per-stock threshold persistence (localStorage).
-const THRESHOLD_STORAGE_PREFIX = 'dsa.indicator.thresholds.';
-
 // Defaults mirror src/services/indicator_service.py DEFAULT_THRESHOLDS.
-const DEFAULT_THRESHOLDS: IndicatorThresholds = {
-  bolConstant: 0.1,
-  macdBuy: 0.7,
-  macdSell: 0.99,
-  kdjBuy: 40,
-  kdjSell: 70,
-  rsiBuy: 10,
-  rsiSell: 70,
-  compositeBuyThreshold: 6,
-  compositeSellThreshold: 6,
-  macdLookback: 120,
-  macdLowPercentile: 15,
-  macdHighPercentile: 85,
-  rsiLow: 15,
-  rsiHigh: 85,
-  kdjLow: 40,
-  kdjHigh: 70,
-  trendPeriod: 200,
-  bollBuyLevel: 0.1,
-  bollSellLevel: 0.9,
-  bollWeight: 0,
-  cciBuyLevel: -100,
-  cciSellLevel: 100,
-  cciWeight: 0,
-  adxMinLevel: 20,
-  dmiWeight: 0,
-  mfiBuyLevel: 20,
-  mfiSellLevel: 80,
-  mfiWeight: 0,
-  volumeConfirmLevel: 1.5,
-  volumeWeight: 0,
-  range52HighLevel: 0.95,
-  range52LowLevel: 1.05,
-  range52Weight: 0,
-};
+const DEFAULT_THRESHOLDS: IndicatorThresholds = DEFAULT_INDICATOR_THRESHOLDS;
 
 // Fill any missing keys with defaults so older stored/backend threshold
 // payloads (7 keys) keep working with the composite thresholds.
 function normalizeThresholds(partial: Partial<IndicatorThresholds> | null | undefined): IndicatorThresholds {
-  const merged: IndicatorThresholds = { ...DEFAULT_THRESHOLDS };
-  if (partial) {
-    for (const key of Object.keys(DEFAULT_THRESHOLDS) as Array<keyof IndicatorThresholds>) {
-      const value = partial[key];
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        merged[key] = value;
-      }
-    }
-  }
-  return merged;
-}
-
-function thresholdStorageKey(stockCode: string): string {
-  return `${THRESHOLD_STORAGE_PREFIX}${stockCode.trim().toUpperCase()}`;
+  return normalizeIndicatorThresholds(partial);
 }
 
 function readStoredThresholds(stockCode: string): IndicatorThresholds | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  try {
-    const rawValue = window.localStorage.getItem(thresholdStorageKey(stockCode));
-    if (!rawValue) {
-      return null;
-    }
-    const parsed = JSON.parse(rawValue) as Partial<IndicatorThresholds>;
-    const requiredKeys: Array<keyof IndicatorThresholds> = [
-      'bolConstant', 'macdBuy', 'macdSell', 'kdjBuy', 'kdjSell', 'rsiBuy', 'rsiSell',
-    ];
-    for (const key of requiredKeys) {
-      const value = parsed[key];
-      if (typeof value !== 'number' || !Number.isFinite(value)) {
-        return null;
-      }
-    }
-    return normalizeThresholds(parsed);
-  } catch {
-    return null;
-  }
+  return readStoredIndicatorThresholds(stockCode);
 }
 
 function writeStoredThresholds(stockCode: string, thresholds: IndicatorThresholds): void {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    window.localStorage.setItem(thresholdStorageKey(stockCode), JSON.stringify(thresholds));
-  } catch {
-    // Local storage is best-effort; keep the in-memory values working.
-  }
+  writeStoredIndicatorThresholds(stockCode, thresholds);
+  notifyIndicatorThresholdsChanged(stockCode);
 }
 
 // ---------------------------------------------------------------------------
@@ -791,7 +722,9 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   const [error, setError] = useState<unknown>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [transactionWindow, setTransactionWindow] = useState(90);
+  const [transactionWindowRaw, setTransactionWindowRaw] = useState('90');
   const [autoTuneYears, setAutoTuneYears] = useState(10);
+  const [autoTuneYearsRaw, setAutoTuneYearsRaw] = useState('10');
   const [autoTuneTestYears, setAutoTuneTestYears] = useState(3);
   const [fineTuneEnabled, setFineTuneEnabled] = useState(false);
   const [fineTuneDays, setFineTuneDays] = useState(360);
@@ -889,7 +822,9 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       setAutoTuneResult(saved.result);
       setSelectedStrategyKey(saved.selectedStrategyKey);
       setTransactionWindow(saved.settings.transactionWindow);
+      setTransactionWindowRaw(String(saved.settings.transactionWindow));
       setAutoTuneYears(saved.settings.autoTuneYears);
+      setAutoTuneYearsRaw(String(saved.settings.autoTuneYears));
       setAutoTuneTestYears(saved.settings.autoTuneTestYears ?? 3);
       setFineTuneEnabled(saved.settings.fineTuneEnabled ?? false);
       setFineTuneDays(saved.settings.fineTuneDays ?? 360);
@@ -1098,7 +1033,9 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     setAutoTuneResult(preset.result);
     setSelectedStrategyKey(preset.selectedStrategyKey);
     setTransactionWindow(preset.settings.transactionWindow);
+    setTransactionWindowRaw(String(preset.settings.transactionWindow));
     setAutoTuneYears(preset.settings.autoTuneYears);
+    setAutoTuneYearsRaw(String(preset.settings.autoTuneYears));
     setAutoTuneTestYears(preset.settings.autoTuneTestYears);
     setTrainRangePct(preset.settings.trainRangePct);
     setFineTuneEnabled(preset.settings.fineTuneEnabled ?? false);
@@ -1597,12 +1534,46 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
             <label className="flex items-center gap-1 text-xs text-secondary-text">
               <span>{t('priceHistory.autoTune.windowLabel')}</span>
-              <input type="number" min="10" max="365" value={transactionWindow} onChange={(event) => setTransactionWindow(Math.min(365, Math.max(10, Number(event.target.value) || 10)))} className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground" />
+              <input
+                type="number"
+                min="10"
+                max="365"
+                value={transactionWindowRaw}
+                onChange={(event) => setTransactionWindowRaw(event.target.value)}
+                onBlur={() => {
+                  if (transactionWindowRaw.trim() === '') {
+                    setTransactionWindowRaw(String(transactionWindow));
+                    return;
+                  }
+                  const parsed = Number(transactionWindowRaw);
+                  const clamped = Math.min(365, Math.max(10, isNaN(parsed) ? 90 : parsed));
+                  setTransactionWindow(clamped);
+                  setTransactionWindowRaw(String(clamped));
+                }}
+                className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
+              />
               <span>D</span>
             </label>
             <label className="flex items-center gap-1 text-xs text-secondary-text">
               <span>{t('priceHistory.autoTune.history')}</span>
-              <input type="number" min="3" max="20" value={autoTuneYears} onChange={(event) => setAutoTuneYears(Math.min(20, Math.max(3, Number(event.target.value) || 10)))} className="w-12 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground" />
+              <input
+                type="number"
+                min="3"
+                max="20"
+                value={autoTuneYearsRaw}
+                onChange={(event) => setAutoTuneYearsRaw(event.target.value)}
+                onBlur={() => {
+                  if (autoTuneYearsRaw.trim() === '') {
+                    setAutoTuneYearsRaw(String(autoTuneYears));
+                    return;
+                  }
+                  const parsed = Number(autoTuneYearsRaw);
+                  const clamped = Math.min(20, Math.max(3, isNaN(parsed) ? 10 : parsed));
+                  setAutoTuneYears(clamped);
+                  setAutoTuneYearsRaw(String(clamped));
+                }}
+                className="w-12 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
+              />
               <span>Y</span>
             </label>
             <label className="flex items-center gap-1 text-xs text-secondary-text">

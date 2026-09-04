@@ -485,4 +485,77 @@ describe('StockIndicatorChart auto tune panel', () => {
       expect(String(lastCall?.[1]?.trainStartDate) < String(lastCall?.[1]?.trainEndDate)).toBe(true);
     });
   });
+
+  it('lets the trade window input be cleared and retyped before blur commits', async () => {
+    renderChart();
+    const tuneButton = await screen.findByRole('button', { name: 'Auto Tune' });
+
+    const windowInput = screen.getByLabelText('交易窗口', { exact: false }) as HTMLInputElement;
+    expect(windowInput.value).toBe('90');
+
+    // Clearing the field must not snap back to the minimum.
+    fireEvent.change(windowInput, { target: { value: '' } });
+    expect(windowInput.value).toBe('');
+
+    // Typing a fresh value then blurring commits it.
+    fireEvent.change(windowInput, { target: { value: '120' } });
+    fireEvent.blur(windowInput);
+    expect(windowInput.value).toBe('120');
+
+    fireEvent.click(tuneButton);
+    await waitFor(() => {
+      const lastCall = vi.mocked(stocksApi.autoTune).mock.calls.at(-1);
+      expect(lastCall?.[1]?.windowDays).toBe(120);
+    });
+  });
+
+  it('restores the default trade window when blurred while empty', async () => {
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+
+    const windowInput = screen.getByLabelText('交易窗口', { exact: false }) as HTMLInputElement;
+    fireEvent.change(windowInput, { target: { value: '' } });
+    expect(windowInput.value).toBe('');
+    fireEvent.blur(windowInput);
+    expect(windowInput.value).toBe('90');
+  });
+
+  it('lets the history years input be cleared and retyped before blur commits', async () => {
+    renderChart();
+    const tuneButton = await screen.findByRole('button', { name: 'Auto Tune' });
+
+    const yearsInput = screen.getByLabelText('历史', { exact: false }) as HTMLInputElement;
+    expect(yearsInput.value).toBe('10');
+
+    fireEvent.change(yearsInput, { target: { value: '' } });
+    expect(yearsInput.value).toBe('');
+
+    fireEvent.change(yearsInput, { target: { value: '15' } });
+    fireEvent.blur(yearsInput);
+    expect(yearsInput.value).toBe('15');
+
+    fireEvent.click(tuneButton);
+    await waitFor(() => {
+      const lastCall = vi.mocked(stocksApi.autoTune).mock.calls.at(-1);
+      expect(lastCall?.[1]?.years).toBe(15);
+    });
+  });
+
+  it('notifies threshold listeners when a threshold input changes', async () => {
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+
+    const seen: string[] = [];
+    const handler = (event: Event) => {
+      seen.push((event as CustomEvent<{ stockCode: string }>).detail.stockCode);
+    };
+    window.addEventListener('dsa-indicator-thresholds-changed', handler);
+    try {
+      const buyInput = screen.getByLabelText('BUY 触发分') as HTMLInputElement;
+      fireEvent.change(buyInput, { target: { value: '5' } });
+      expect(seen).toContain('600519');
+    } finally {
+      window.removeEventListener('dsa-indicator-thresholds-changed', handler);
+    }
+  });
 });
