@@ -1,11 +1,12 @@
 import type React from 'react';
-import type { CSSProperties } from 'react';
 import { cn } from '../../utils/cn';
 import { areStockCodesEquivalent } from '../../utils/stockCode';
 import type { CompositeSummaryEntry } from '../../utils/compositeSummary';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { Button } from '../common';
 import { DashboardPanelHeader, DashboardStateBlock } from '../dashboard';
+import { CurrentPositionTable } from './CurrentPositionTable';
+import { getSummaryStockStyle } from './summaryStockStyle';
 
 interface SignalSummaryBoardProps {
   className?: string;
@@ -16,20 +17,6 @@ interface SignalSummaryBoardProps {
   onStockSelect: (entry: CompositeSummaryEntry) => void;
   selectedRecordId?: number | null;
   selectedStockCode?: string | null;
-}
-
-function stockBoxStyle(entry: CompositeSummaryEntry): CSSProperties | undefined {
-  if (entry.tone === 'buy') {
-    return entry.intensity === 'strong'
-      ? { background: 'hsl(var(--success) / 0.35)' }
-      : { background: 'hsl(var(--success) / 0.15)' };
-  }
-  if (entry.tone === 'sell') {
-    return entry.intensity === 'strong'
-      ? { background: 'hsl(var(--destructive) / 0.35)' }
-      : { background: 'hsl(var(--destructive) / 0.15)' };
-  }
-  return undefined;
 }
 
 export const SignalSummaryBoard: React.FC<SignalSummaryBoardProps> = ({
@@ -110,8 +97,7 @@ export const SignalSummaryBoard: React.FC<SignalSummaryBoardProps> = ({
                 }}
                 disabled={!canOpenDetail}
                 aria-label={ariaLabel}
-                title={ariaLabel}
-                style={stockBoxStyle(entry)}
+                style={getSummaryStockStyle(entry)}
                 className={cn(
                   'home-history-item w-fit min-w-0 shrink-0 text-left',
                   isSelected ? 'home-history-item-selected' : '',
@@ -126,6 +112,7 @@ export const SignalSummaryBoard: React.FC<SignalSummaryBoardProps> = ({
           })}
         </div>
       )}
+      <CurrentPositionTable entries={entries} />
     </section>
   );
 };

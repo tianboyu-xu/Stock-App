@@ -67,6 +67,7 @@ describe('findLatestCompositeTrigger', () => {
     const trigger = findLatestCompositeTrigger(payload);
     expect(trigger?.side).toBe('sell');
     expect(trigger?.date).toBe(payload.dates[7]);
+    expect(trigger?.price).toBe(100);
   });
 
   it('returns null when buy and sell tie on the same bar', () => {
@@ -118,6 +119,21 @@ describe('buildCompositeSummaryEntries', () => {
       todayKey: TODAY,
     });
     expect(entries[0]).toMatchObject({ tone: 'none', intensity: 'none', triggerDate: dayKey(9) });
+  });
+
+  it('preserves trigger side and price for stale triggers', () => {
+    const entries = buildCompositeSummaryEntries({
+      codes: ['600519'],
+      triggers: { '600519': makePayload({ sell: [0], days: 10 }) },
+      todayKey: TODAY,
+    });
+    expect(entries[0]).toMatchObject({
+      tone: 'none',
+      intensity: 'none',
+      triggerDate: dayKey(9),
+      triggerPrice: 100,
+      triggerSide: 'sell',
+    });
   });
 
   it('keeps future-dated markers uncolored', () => {

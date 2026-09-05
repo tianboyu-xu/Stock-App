@@ -7,6 +7,7 @@ export interface CompositeTriggerInfo {
   side: 'buy' | 'sell';
   date: string;
   index: number;
+  price: number | null;
 }
 
 export interface CompositeSummaryEntry {
@@ -15,6 +16,8 @@ export interface CompositeSummaryEntry {
   tone: CompositeTriggerTone;
   intensity: CompositeTriggerIntensity;
   triggerDate: string | null;
+  triggerPrice?: number | null;
+  triggerSide?: 'buy' | 'sell' | null;
 }
 
 export interface CompositeTriggerInput {
@@ -72,9 +75,19 @@ export function findLatestCompositeTrigger(input: CompositeTriggerInput): Compos
     return null;
   }
   if (buyIndex > sellIndex) {
-    return { side: 'buy', date: dates[buyIndex], index: buyIndex };
+    return {
+      side: 'buy',
+      date: dates[buyIndex],
+      index: buyIndex,
+      price: input.composite?.buySignal?.[buyIndex] ?? null,
+    };
   }
-  return { side: 'sell', date: dates[sellIndex], index: sellIndex };
+  return {
+    side: 'sell',
+    date: dates[sellIndex],
+    index: sellIndex,
+    price: input.composite?.sellSignal?.[sellIndex] ?? null,
+  };
 }
 
 export interface BuildCompositeSummaryArgs {
@@ -103,7 +116,7 @@ export function buildCompositeSummaryEntries(args: BuildCompositeSummaryArgs): C
     }
     const age = dayAgeInDays(trigger.date, args.todayKey);
     if (age === null || age < 0 || age > COMPOSITE_LIGHT_WINDOW_DAYS) {
-      return { ...fallback, triggerDate: trigger.date };
+      return { ...fallback, triggerDate: trigger.date, triggerPrice: trigger.price, triggerSide: trigger.side };
     }
     return {
       code,
@@ -111,6 +124,8 @@ export function buildCompositeSummaryEntries(args: BuildCompositeSummaryArgs): C
       tone: trigger.side,
       intensity: age <= COMPOSITE_STRONG_WINDOW_DAYS ? 'strong' : 'light',
       triggerDate: trigger.date,
+      triggerPrice: trigger.price,
+      triggerSide: trigger.side,
     };
   });
 }

@@ -25,6 +25,21 @@ export interface StockHistoryResponse {
   data: KLineData[];
 }
 
+export interface StockQuoteResponse {
+  stockCode: string;
+  stockName?: string | null;
+  currentPrice: number;
+  change?: number | null;
+  changePercent?: number | null;
+  open?: number | null;
+  high?: number | null;
+  low?: number | null;
+  prevClose?: number | null;
+  volume?: number | null;
+  amount?: number | null;
+  updateTime?: string | null;
+}
+
 export type IndicatorSeries = Array<number | null>;
 
 export interface IndicatorTriggers {
@@ -323,6 +338,17 @@ export const stocksApi = {
       { params: queryParams },
     );
     return toCamelCase<StockHistoryResponse>(response.data);
+  },
+
+  /**
+   * Fetch the latest quote used by the current-position summary.
+   * Backend: GET /api/v1/stocks/{stock_code}/quote
+   */
+  async getQuote(code: string): Promise<StockQuoteResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/stocks/${encodeURIComponent(code)}/quote`,
+    );
+    return toCamelCase<StockQuoteResponse>(response.data);
   },
 
   /**
