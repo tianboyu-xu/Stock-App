@@ -40,6 +40,8 @@ const TEXT: Record<string, string> = {
   'home.currentPositionsTableAria': 'Current positions table',
   'home.currentPositionsAddAria': 'Add current position',
   'home.currentPositionsRefreshAria': 'Refresh position quotes',
+  'home.currentPositionsCollapseAria': 'Collapse current positions',
+  'home.currentPositionsExpandAria': 'Expand current positions',
   'home.currentPositionsEmptyTitle': 'No current positions',
   'home.currentPositionsEmptyDescription': 'Add a position',
   'home.currentPositionsStock': 'Stock',
@@ -372,5 +374,47 @@ describe('CurrentPositionTable', () => {
       const stored = JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]');
       expect(stored.map((item: { code: string }) => item.code)).toEqual(['MSFT', 'AAPL']);
     });
+  });
+
+  it('collapses the table and profit chart and remembers the state', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 1, account: 'HSA',
+    }]));
+    const { unmount } = render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    await screen.findAllByText('AAPL');
+    expect(screen.getByRole('columnheader', { name: 'Quantity' })).toBeInTheDocument();
+    expect(screen.getByTestId('current-position-profit-chart')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse current positions' }));
+    expect(screen.queryByRole('columnheader', { name: 'Quantity' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('current-position-profit-chart')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.currentPositionsCollapsed.v1')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand current positions' }));
+    expect(screen.getByRole('columnheader', { name: 'Quantity' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.currentPositionsCollapsed.v1')).toBe('false');
+    unmount();
+  });
+
+  it('starts collapsed when the stored preference is true', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 1, account: 'HSA',
+    }]));
+    window.localStorage.setItem('dsa.home.currentPositionsCollapsed.v1', 'true');
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    expect(screen.queryByRole('columnheader', { name: 'Quantity' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Expand current positions' })).toHaveAttribute('aria-expanded', 'false');
   });
 });

@@ -22,6 +22,7 @@ export interface CurrentPositionMetrics {
 }
 
 export const CURRENT_POSITIONS_STORAGE_KEY = 'dsa.home.currentPositions.v1';
+export const CURRENT_POSITIONS_COLLAPSED_STORAGE_KEY = 'dsa.home.currentPositionsCollapsed.v1';
 export const SHORT_TERM_CAPITAL_GAINS_TAX_PCT = 35;
 export const LONG_TERM_CAPITAL_GAINS_TAX_PCT = 15;
 export const LONG_TERM_HOLDING_DAYS = 365;
@@ -154,5 +155,23 @@ export function writeStoredCurrentPositions(positions: CurrentPosition[]): void 
     window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify(positions));
   } catch {
     // Browser storage is best-effort; the table remains usable in memory.
+  }
+}
+
+export function readStoredCurrentPositionsCollapsed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(CURRENT_POSITIONS_COLLAPSED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function writeStoredCurrentPositionsCollapsed(collapsed: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CURRENT_POSITIONS_COLLAPSED_STORAGE_KEY, String(collapsed));
+  } catch {
+    // Browser storage is best-effort; the toggle remains usable in memory.
   }
 }

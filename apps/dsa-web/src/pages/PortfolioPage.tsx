@@ -1202,12 +1202,12 @@ const PortfolioPage: React.FC = () => {
               <table className="min-w-[860px] w-full text-sm">
                 <thead className="text-xs text-secondary border-b border-white/10">
                   <tr>
-                    <th className="text-left py-2 pr-2">{text.account}</th>
-                    <th className="text-left py-2 pr-2">{text.code}</th>
-                    <th className="text-right py-2 pr-2">{text.quantity}</th>
-                    <th className="text-right py-2 pr-2">{text.avgCost}</th>
-                    <th className="text-right py-2 pr-2">{text.lastPrice}</th>
-                    <th className="text-right py-2 pr-2">{text.marketValue}</th>
+                    <th className="text-left py-2 pr-3">{text.account}</th>
+                    <th className="text-left py-2 pr-3">{text.code}</th>
+                    <th className="text-right py-2 pr-3">{text.quantity}</th>
+                    <th className="text-right py-2 pr-3">{text.avgCost}</th>
+                    <th className="text-right py-2 pr-3">{text.lastPrice}</th>
+                    <th className="text-right py-2 pr-3">{text.marketValue}</th>
                     <th className="text-right py-2 pr-3">{text.unrealizedPnl}</th>
                     <th className="text-right py-2 pr-3">{text.returnPct}</th>
                     <th className="min-w-[9rem] text-right py-2 pr-3">{t('decisionSignals.portfolioColumn')}</th>
@@ -1221,17 +1221,17 @@ const PortfolioPage: React.FC = () => {
                     const signal = signalByPositionKey.get(rowKey);
                     return (
                     <tr key={rowKey} className="border-b border-white/5">
-                      <td className="py-2 pr-2 text-secondary">{row.accountName}</td>
-                      <td className="py-2 pr-2 font-mono text-foreground">{row.symbol}</td>
-                      <td className="py-2 pr-2 text-right">{row.quantity.toFixed(2)}</td>
-                      <td className="py-2 pr-2 text-right">{row.avgCost.toFixed(4)}</td>
-                      <td className="py-2 pr-2 text-right">
+                      <td className="py-2 pr-3 text-secondary">{row.accountName}</td>
+                      <td className="py-2 pr-3 font-mono text-foreground">{row.symbol}</td>
+                      <td className="py-2 pr-3 text-right">{row.quantity.toFixed(2)}</td>
+                      <td className="py-2 pr-3 text-right">{row.avgCost.toFixed(4)}</td>
+                      <td className="py-2 pr-3 text-right">
                         <div>{formatPositionPrice(row)}</div>
                         <div className={`text-[11px] ${hasPositionPrice(row) ? 'text-secondary' : 'text-warning'}`}>
                           {getPositionPriceLabel(row)}
                         </div>
                       </td>
-                      <td className="py-2 pr-2 text-right">{formatPositionMoney(row.marketValueBase, row)}</td>
+                      <td className="py-2 pr-3 text-right">{formatPositionMoney(row.marketValueBase, row)}</td>
                       <td
                         className={`py-2 pr-3 text-right ${
                           hasPositionPrice(row)

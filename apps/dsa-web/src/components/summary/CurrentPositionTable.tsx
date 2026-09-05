@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, CircleAlert, GripVertical, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, CircleAlert, GripVertical, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { stocksApi } from '../../api/stocks';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { getTodayInShanghai } from '../../utils/format';
@@ -8,7 +8,9 @@ import {
   calculateCurrentPositionMetrics,
   POSITION_ACCOUNT_OPTIONS,
   readStoredCurrentPositions,
+  readStoredCurrentPositionsCollapsed,
   writeStoredCurrentPositions,
+  writeStoredCurrentPositionsCollapsed,
   type CurrentPosition,
   type PositionAccount,
 } from '../../utils/currentPosition';
@@ -74,6 +76,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
   const { language, t } = useUiLanguage();
   const asOfDate = getTodayInShanghai();
   const [positions, setPositions] = useState<CurrentPosition[]>(readStoredCurrentPositions);
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(readStoredCurrentPositionsCollapsed);
   const [quoteStates, setQuoteStates] = useState<Record<string, QuoteState>>({});
   const [quoteRefreshVersion, setQuoteRefreshVersion] = useState(0);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -90,6 +93,14 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
   useEffect(() => {
     writeStoredCurrentPositions(positions);
   }, [positions]);
+
+  const handleCollapsedToggle = () => {
+    setIsCollapsed((previous) => {
+      const next = !previous;
+      writeStoredCurrentPositionsCollapsed(next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     const requestId = quoteRequestRef.current + 1;
@@ -405,6 +416,20 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
                 variant="ghost"
                 size="xsm"
                 className="h-7 w-7 px-0"
+                aria-expanded={!isCollapsed}
+                aria-label={isCollapsed ? t('home.currentPositionsExpandAria') : t('home.currentPositionsCollapseAria')}
+                onClick={handleCollapsedToggle}
+              >
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${isCollapsed ? '-rotate-90' : ''}`}
+                  aria-hidden="true"
+                />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xsm"
+                className="h-7 w-7 px-0"
                 disabled={positions.length === 0 || quotesLoading}
                 onClick={() => setQuoteRefreshVersion((version) => version + 1)}
                 aria-label={t('home.currentPositionsRefreshAria')}
@@ -436,6 +461,8 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
         </p>
       </div>
 
+      {isCollapsed ? null : (
+      <>
       {showAddForm ? (
         <form
           data-testid="current-position-form"
@@ -541,23 +568,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
       ) : (
         <div className="overflow-x-auto px-3 pb-3 sm:px-4">
           {editError ? <p className="mb-2 text-xs text-danger" role="alert">{editError}</p> : null}
-          <table className="min-w-[1300px] w-full table-fixed text-xs" aria-label={t('home.currentPositionsTableAria')}>
-            <colgroup>
-              <col className="w-[9rem]" />
-              <col className="w-[6.5rem]" />
-              <col className="w-[7rem]" />
-              <col className="w-[7rem]" />
-              <col className="w-[6.5rem]" />
-              <col className="w-[5.5rem]" />
-              <col className="w-[7.5rem]" />
-              <col className="w-[7.5rem]" />
-              <col className="w-[6.5rem]" />
-              <col className="w-[7rem]" />
-              <col className="w-[7rem]" />
-              <col className="w-[5.5rem]" />
-              <col className="w-[6.5rem]" />
-              <col className="w-[4.5rem]" />
-            </colgroup>
+          <table className="min-w-[1300px] w-full text-xs" aria-label={t('home.currentPositionsTableAria')}>
             <thead className="border-b border-subtle text-[11px] text-secondary-text">
               <tr>
                 <th scope="col" className="whitespace-nowrap px-2 py-2 text-left font-medium">{t('home.currentPositionsStock')}</th>
@@ -575,7 +586,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
                 <th scope="col" className="whitespace-nowrap px-2 py-2 text-right font-medium">
                   {t('home.currentPositionsAfterTaxCagr')}
                 </th>
-                <th scope="col" className="w-[4.5rem] px-2 py-2 text-right font-medium"><span className="sr-only">{t('common.delete')}</span></th>
+                <th scope="col" className="px-2 py-2 text-right font-medium"><span className="sr-only">{t('common.delete')}</span></th>
               </tr>
             </thead>
             <tbody>
@@ -618,7 +629,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
                     onDragEnd={handlePositionDragEnd}
                     className={`border-b border-subtle last:border-b-0 ${isDragging ? 'opacity-40' : ''}`}
                   >
-                    <td className="max-w-[11rem] whitespace-nowrap px-2 py-2.5 text-left">
+                    <td className="whitespace-nowrap px-2 py-2.5 text-left">
                       <div className="flex items-center gap-1">
                         <span
                           className="flex shrink-0 cursor-grab items-center text-muted-text active:cursor-grabbing"
@@ -628,7 +639,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
                           <GripVertical className="h-4 w-4" aria-hidden="true" />
                         </span>
                         {isEditing ? (
-                          <div className="min-w-[8rem] flex-1 rounded-xl" style={trigger ? getSummaryStockStyle(trigger) : undefined}>
+                          <div className="flex-1 rounded-xl" style={trigger ? getSummaryStockStyle(trigger) : undefined}>
                             <StockAutocomplete
                               value={editDraft.code}
                               onChange={(value) => setEditDraft((previous) => previous ? ({ ...previous, code: value }) : previous)}
@@ -812,6 +823,8 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
         </div>
       )}
       {positions.length > 0 ? <CurrentPositionProfitChart positions={positions} /> : null}
+      </>
+      )}
     </section>
   );
 };
