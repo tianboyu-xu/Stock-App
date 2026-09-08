@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
+import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type AutoTuneTestConfidence, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
 import type { UiTextKey } from '../../i18n/uiText';
 import {
   DEFAULT_INDICATOR_THRESHOLDS,
@@ -155,6 +155,11 @@ function writeStoredThresholds(stockCode: string, thresholds: IndicatorThreshold
 const AUTOTUNE_STORAGE_PREFIX = 'dsa.autotune.';
 const AUTOTUNE_PRESETS_STORAGE_KEY = 'dsa.autotune.presets';
 
+function hasCurrentMethodology(result: AutoTuneResponse): boolean {
+  return result.methodologyVersion === AUTO_TUNE_METHODOLOGY_VERSION
+    && (!result.fineTune || result.fineTune.selectionBasis === 'validation');
+}
+
 interface AutoTunePreset {
   id: string;
   name: string;
@@ -271,7 +276,9 @@ function estimateAutoTuneDuration(
 ): number {
   const fetchMs = 8000;
   const trainYears = Math.max(1, (years - testYears) * clippedRatio);
-  const optimizeMs = 5000 + trainYears * 2200;
+  // Initial estimate allows for up to three chronological validation folds.
+  // Completed runs replace this rough allowance with measured durations.
+  const optimizeMs = (5000 + trainYears * 2200) * 3;
   // Sweep windows cover ~the full train span with step = window/5, so total
   // sweep cost is roughly a few times a single full-train optimization.
   const fineTuneMs = fineTuneWindows > 0 ? optimizeMs * Math.min(6, fineTuneWindows) * 0.8 : 0;
@@ -486,10 +493,11 @@ const AUTO_TUNE_REASON_KEYS: Record<string, string> = {
   baseline_sufficient: 'priceHistory.autoTune.reason.baseline_sufficient',
   best_validation: 'priceHistory.autoTune.reason.best_validation',
   simplicity_preference: 'priceHistory.autoTune.reason.simplicity_preference',
+  insufficient_validation_trades: 'priceHistory.autoTune.reason.insufficient_validation_trades',
 };
 
 const formatAutoTuneValue = (value: number | null | undefined): string =>
-  typeof value === 'number' && Number.isFinite(value) ? String(value) : '--';
+  typeof value === 'number' && Number.isFinite(value) ? String(Number(value.toFixed(4))) : '--';
 
 const formatEquityPct = (value: number): string =>
   `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
@@ -649,29 +657,30 @@ interface FineTuneSweepChartProps {
 }
 
 function FineTuneSweepChart({ sweep, bestIndex }: FineTuneSweepChartProps) {
+  const { t } = useUiLanguage();
   if (!sweep.length) return null;
   const WIDTH = 600;
   const HEIGHT = 120;
   const PAD = { top: 10, right: 50, bottom: 24, left: 10 };
   const plotW = WIDTH - PAD.left - PAD.right;
   const plotH = HEIGHT - PAD.top - PAD.bottom;
-  const barW = Math.max(6, Math.min(30, plotW / sweep.length - 2));
-  const gap = (plotW - barW * sweep.length) / Math.max(sweep.length - 1, 1);
-  const cagrs = sweep.map((p) => p.testCagr);
-  const maxVal = Math.max(...cagrs, 1);
-  const minVal = Math.min(...cagrs, 0);
+  const slotW = plotW / sweep.length;
+  const barW = Math.min(30, slotW * 0.8);
+  const scores = sweep.map((p) => p.validationScore);
+  const maxVal = Math.max(...scores, 1);
+  const minVal = Math.min(...scores, 0);
   const range = maxVal - minVal || 1;
   const zeroY = PAD.top + (maxVal / range) * plotH;
   const yScale = (v: number) => PAD.top + ((maxVal - v) / range) * plotH;
 
   return (
-    <svg width={WIDTH} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="block w-full" style={{ maxWidth: WIDTH }}>
+    <svg role="img" aria-label={t('priceHistory.autoTune.fineTune.scoreTitle')} width={WIDTH} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="block w-full" style={{ maxWidth: WIDTH }}>
       {/* Zero line */}
       <line x1={PAD.left} x2={WIDTH - PAD.right} y1={zeroY} y2={zeroY} stroke="var(--border)" strokeOpacity="0.5" />
       {/* Bars */}
       {sweep.map((pos, i) => {
-        const x = PAD.left + i * (barW + gap);
-        const val = pos.testCagr;
+        const x = PAD.left + i * slotW + (slotW - barW) / 2;
+        const val = pos.validationScore;
         const barTop = val >= 0 ? yScale(val) : zeroY;
         const barH = Math.abs(yScale(val) - zeroY);
         const isBest = pos.positionIndex === bestIndex;
@@ -687,7 +696,7 @@ function FineTuneSweepChart({ sweep, bestIndex }: FineTuneSweepChartProps) {
               opacity={isBest ? '1' : '0.65'}
             />
             {/* Value label */}
-            <text
+            {slotW >= 28 || isBest ? <text
               x={x + barW / 2}
               y={val >= 0 ? barTop - 3 : barTop + barH + 10}
               fontSize="9"
@@ -695,12 +704,12 @@ function FineTuneSweepChart({ sweep, bestIndex }: FineTuneSweepChartProps) {
               textAnchor="middle"
               fontWeight={isBest ? 'bold' : 'normal'}
             >
-              {val.toFixed(1)}%
-            </text>
+              {val.toFixed(2)}
+            </text> : null}
             {/* Position label */}
-            <text x={x + barW / 2} y={HEIGHT - 4} fontSize="8" fill="#6b7280" textAnchor="middle">
+            {slotW >= 20 || isBest ? <text x={x + barW / 2} y={HEIGHT - 4} fontSize="8" fill="#6b7280" textAnchor="middle">
               {pos.positionIndex + 1}
-            </text>
+            </text> : null}
           </g>
         );
       })}
@@ -711,6 +720,29 @@ function FineTuneSweepChart({ sweep, bestIndex }: FineTuneSweepChartProps) {
 export interface StockIndicatorChartProps {
   stockCode: string;
   stockName?: string;
+}
+
+function TestConfidence({ confidence }: { confidence: AutoTuneTestConfidence }) {
+  const { t } = useUiLanguage();
+  return (
+    <div className="mt-2 text-xs text-secondary-text" data-testid="test-confidence">
+      {confidence.available ? (
+        <>
+          <span>{t('priceHistory.autoTune.confidence.interval', {
+            level: String(Math.round(confidence.confidenceLevel * 100)),
+            lower: formatAutoTuneValue(confidence.sharpeCiLower),
+            upper: formatAutoTuneValue(confidence.sharpeCiUpper),
+          })}</span>
+          <span>{' · '}{t('priceHistory.autoTune.confidence.positiveShare', {
+            percent: formatAutoTuneValue((confidence.positiveSharpeFraction ?? 0) * 100),
+          })}</span>
+        </>
+      ) : (
+        <span>{t('priceHistory.autoTune.confidence.insufficient')}</span>
+      )}
+      <p className="mt-1">{t('priceHistory.autoTune.confidence.note')}</p>
+    </div>
+  );
 }
 
 export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockCode, stockName }) => {
@@ -896,7 +928,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       fineTuneEnabled && fineTuneDays > 0
         ? Math.max(1, Math.floor(((autoTuneYears - autoTuneTestYears) * 365 - fineTuneDays) / Math.max(1, Math.floor(fineTuneDays / 5))) + 1)
         : 0;
-    const durationSignature = `${autoTuneYears}|${autoTuneTestYears}|${fineTuneWindows}|${clipped ? 'clipped' : 'full'}`;
+    const durationSignature = `${AUTO_TUNE_METHODOLOGY_VERSION}|${autoTuneYears}|${autoTuneTestYears}|${fineTuneWindows}|${clipped ? 'clipped' : 'full'}`;
     const calibratedMs = readStoredDurations()[durationSignature];
     const estimateMs = calibratedMs ?? estimateAutoTuneDuration(autoTuneYears, autoTuneTestYears, fineTuneWindows, clipped ? 0.7 : 1);
     const startedAt = Date.now();
@@ -984,7 +1016,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   }, [selectedStrategyKey, autoTuneResult, stockCode]);
 
   const applyAutoTunedThresholds = useCallback(() => {
-    if (!autoTuneResult) return;
+    if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult)) return;
     const selectedKey = selectedStrategyKey ?? autoTuneResult.recommended.strategyKey;
     const selected = autoTuneResult.strategies.find((strategy) => strategy.key === selectedKey);
     if (!selected) return;
@@ -1006,7 +1038,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
 
   // --- Preset management ---------------------------------------------------
   const savePreset = useCallback(() => {
-    if (!autoTuneResult || !presetNameInput.trim()) return;
+    if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult) || !presetNameInput.trim()) return;
     const preset: AutoTunePreset = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: presetNameInput.trim(),
@@ -1079,6 +1111,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   const selectedAutoTuneKey = selectedStrategyKey
     ?? autoTuneResult?.recommended.strategyKey
     ?? null;
+  const isCurrentAutoTune = autoTuneResult != null && hasCurrentMethodology(autoTuneResult);
   const selectedAutoTuneStrategy = autoTuneResult?.strategies.find(
     (strategy) => strategy.key === selectedAutoTuneKey,
   ) ?? null;
@@ -1630,7 +1663,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 </option>
                 {presets.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name}
+                    {p.name}{hasCurrentMethodology(p.result) ? '' : ` · ${t('priceHistory.autoTune.presets.outdated')}`}
                   </option>
                 ))}
               </select>
@@ -1675,6 +1708,16 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
 
       {autoTuneResult ? (
         <div className="order-4 mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          {!isCurrentAutoTune ? (
+            <p role="alert" className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-500">
+              {t('priceHistory.autoTune.outdatedResult')}
+            </p>
+          ) : null}
+          {isCurrentAutoTune && autoTuneResult.walkForward ? (
+            <p className="mb-2 text-xs text-secondary-text">
+              {t('priceHistory.autoTune.walkForward', { count: String(autoTuneResult.walkForward.folds.length) })}
+            </p>
+          ) : null}
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-semibold text-foreground">{t('priceHistory.autoTune.title')}</div>
             <div className="text-xs text-secondary-text">
@@ -2012,6 +2055,23 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 || selectedAutoTuneKey}
             </span>
           </div>
+          {isCurrentAutoTune && selectedAutoTuneStrategy?.validationScore != null ? (
+            <p className="mt-1 text-xs text-secondary-text">
+              {t('priceHistory.autoTune.fineTune.validationScore')}: {formatAutoTuneValue(selectedAutoTuneStrategy.validationScore)}
+              {' · '}{t('priceHistory.autoTune.validationDispersion')}: {formatAutoTuneValue(selectedAutoTuneStrategy.validationScoreDispersion)}
+              {selectedAutoTuneStrategy.validationPositiveFolds != null ? (
+                <span>{' · '}{t('priceHistory.autoTune.validationEvidence', {
+                  positive: String(selectedAutoTuneStrategy.validationPositiveFolds),
+                  total: String(selectedAutoTuneStrategy.validationFolds?.length ?? 0),
+                  eligible: String(selectedAutoTuneStrategy.validationEligibleFolds ?? 0),
+                  worst: formatAutoTuneValue(selectedAutoTuneStrategy.validationWorstCagrPct),
+                })}</span>
+              ) : null}
+            </p>
+          ) : null}
+          {isCurrentAutoTune && selectedAutoTuneStrategy?.testConfidence ? (
+            <TestConfidence confidence={selectedAutoTuneStrategy.testConfidence} />
+          ) : null}
           <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
             {selectedParamDisplay.map((param) => (
               <label key={param.key} className="flex flex-col gap-0.5 text-xs text-secondary-text">
@@ -2032,7 +2092,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs text-secondary-text">{t('priceHistory.autoTune.fixedParams')}</span>
             <div className="flex flex-wrap gap-2">
-              <Button variant="primary" size="sm" onClick={applyAutoTunedThresholds}>
+              <Button variant="primary" size="sm" onClick={applyAutoTunedThresholds} disabled={!isCurrentAutoTune}>
                 {t('priceHistory.autoTune.applySelected')}
               </Button>
             </div>
@@ -2053,7 +2113,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                   className="flex-1 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
                   autoFocus
                 />
-                <Button variant="primary" size="sm" onClick={savePreset} disabled={!presetNameInput.trim()}>
+                <Button variant="primary" size="sm" onClick={savePreset} disabled={!isCurrentAutoTune || !presetNameInput.trim()}>
                   {t('priceHistory.autoTune.presets.save')}
                 </Button>
                 <Button variant="secondary" size="sm" onClick={() => { setShowPresetInput(false); setPresetNameInput(''); }}>
@@ -2062,7 +2122,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="secondary" size="sm" onClick={() => setShowPresetInput(true)}>
+                <Button variant="secondary" size="sm" onClick={() => setShowPresetInput(true)} disabled={!isCurrentAutoTune}>
                   {t('priceHistory.autoTune.presets.saveAs')}
                 </Button>
                 {presets.length > 0 ? (
@@ -2081,7 +2141,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                       className="hover:text-primary"
                       title={t('priceHistory.autoTune.presets.loadTooltip')}
                     >
-                      {p.name}
+                      {p.name}{hasCurrentMethodology(p.result) ? '' : ` · ${t('priceHistory.autoTune.presets.outdated')}`}
                     </button>
                     <button
                       type="button"
@@ -2097,7 +2157,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
             )}
           </div>
           {/* Fine Tune sweep results */}
-          {autoTuneResult.fineTune && autoTuneResult.fineTune.sweep.length > 0 ? (
+          {isCurrentAutoTune && autoTuneResult.fineTune && autoTuneResult.fineTune.sweep.length > 0 ? (
             <div className="mt-3 border-t border-border/40 pt-2">
               <div className="mb-1 text-xs font-medium text-secondary-text">
                 {t('priceHistory.autoTune.fineTune.title')}
@@ -2106,8 +2166,27 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 {' · '}
                 {t('priceHistory.autoTune.fineTune.window')}: {autoTuneResult.fineTune.windowDays}D
               </div>
-              {/* CAGR bar chart */}
+              <p className="mb-2 text-xs text-secondary-text">{t('priceHistory.autoTune.fineTune.selectionNote')}</p>
+              <div className="text-xs text-secondary-text">{t('priceHistory.autoTune.fineTune.scoreTitle')}</div>
               <FineTuneSweepChart sweep={autoTuneResult.fineTune.sweep} bestIndex={autoTuneResult.fineTune.bestPositionIndex} />
+              {autoTuneResult.fineTune.finalTest ? (
+                <div className="mt-2 rounded-md border border-border/40 p-2 text-xs" data-testid="fine-tune-final-test">
+                  <div className="font-medium text-foreground">
+                    {t('priceHistory.autoTune.fineTune.finalTest')}
+                    {' · #'}{autoTuneResult.fineTune.finalTest.positionIndex + 1}
+                    {' · '}{autoTuneResult.fineTune.finalTest.strategyKey}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 tabular-nums text-secondary-text">
+                    <span>CAGR: {formatAutoTuneValue(autoTuneResult.fineTune.finalTest.metrics.cagrPct)}%</span>
+                    <span>Sharpe: {formatAutoTuneValue(autoTuneResult.fineTune.finalTest.metrics.sharpe)}</span>
+                    <span>Max DD: {formatAutoTuneValue(autoTuneResult.fineTune.finalTest.metrics.maxDrawdownPct)}%</span>
+                    <span>{t('priceHistory.autoTune.trades')}: {autoTuneResult.fineTune.finalTest.metrics.trades}</span>
+                  </div>
+                  {autoTuneResult.fineTune.finalTest.confidence ? (
+                    <TestConfidence confidence={autoTuneResult.fineTune.finalTest.confidence} />
+                  ) : null}
+                </div>
+              ) : null}
               {/* Sweep detail table (collapsed by default) */}
               <button
                 type="button"
@@ -2124,11 +2203,13 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                     <tr className="border-b border-border/40">
                       <th className="px-2 py-1 text-left font-medium">#</th>
                       <th className="px-2 py-1 text-left font-medium">{t('priceHistory.autoTune.fineTune.trainRange')}</th>
+                      <th className="px-2 py-1 text-left font-medium">{t('priceHistory.autoTune.fineTune.validationRange')}</th>
                       <th className="px-2 py-1 text-left font-medium">{t('priceHistory.autoTune.fineTune.strategy')}</th>
-                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.oosCagr')}</th>
-                      <th className="px-2 py-1 text-right font-medium">Sharpe</th>
-                      <th className="px-2 py-1 text-right font-medium">Max DD</th>
-                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.trades')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.validationScore')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.validationCagr')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.validationSharpe')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.validationMaxDd')}</th>
+                      <th className="px-2 py-1 text-right font-medium">{t('priceHistory.autoTune.fineTune.validationTrades')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2147,13 +2228,15 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                             {isBest ? <span className="ml-1 text-primary">★</span> : null}
                           </td>
                           <td className="px-2 py-1">{pos.trainStart} ~ {pos.trainEnd} ({pos.trainBars}D)</td>
+                          <td className="px-2 py-1">{pos.validationStart} ~ {pos.validationEnd}</td>
                           <td className="px-2 py-1">{stratLabel}</td>
-                          <td className={`px-2 py-1 text-right tabular-nums ${pos.testCagr >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {pos.testCagr.toFixed(1)}%
+                          <td className="px-2 py-1 text-right tabular-nums">{pos.validationScore.toFixed(2)}</td>
+                          <td className={`px-2 py-1 text-right tabular-nums ${pos.validationCagr >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {pos.validationCagr.toFixed(1)}%
                           </td>
-                          <td className="px-2 py-1 text-right tabular-nums">{pos.testSharpe.toFixed(2)}</td>
-                          <td className="px-2 py-1 text-right tabular-nums text-red-400">{pos.testMaxDd.toFixed(1)}%</td>
-                          <td className="px-2 py-1 text-right tabular-nums">{pos.testTrades}</td>
+                          <td className="px-2 py-1 text-right tabular-nums">{pos.validationSharpe.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right tabular-nums text-red-400">{pos.validationMaxDd.toFixed(1)}%</td>
+                          <td className="px-2 py-1 text-right tabular-nums">{pos.validationTrades}</td>
                         </tr>
                       );
                     })}

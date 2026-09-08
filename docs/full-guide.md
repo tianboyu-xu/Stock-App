@@ -1560,6 +1560,10 @@ FastAPI 提供 RESTful API 服务，支持配置管理和触发分析。
 | `python main.py --serve` | 启动 API 服务 + 执行一次完整分析 |
 | `python main.py --serve-only` | 仅启动 API 服务，手动触发分析 |
 
+### macOS 一键启动
+
+在 Finder 中双击仓库根目录的 `Start-WebUI.command`（可拖到 Dock 做成常驻图标），终端会自动检查 Python 3.10+、准备 `.venv` / 依赖 / `.env`，以前台方式运行 `python main.py --serve-only`（日志可见，Ctrl+C 停止），并在服务就绪后自动用默认浏览器打开 WebUI。等价终端命令为 `bash scripts/start-webui-macos.sh`。首次运行若缺 Python 3.10+，脚本会提示执行 `brew install python@3.12` 后重试；`static/` 前端产物缺失且未安装 Node 时首页显示构建引导页，API 仍可用。
+
 ### 功能特性
 
 - 📝 **配置管理** - 查看/修改自选股列表

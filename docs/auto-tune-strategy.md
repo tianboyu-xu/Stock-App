@@ -18,7 +18,7 @@
 ## 2. 设计原则
 
 1. **单一公式实现**：所有扩展因子的计算集中在
-   [`src/services/composite_factors.py`](../../src/services/composite_factors.py)，
+   [`src/services/composite_factors.py`](../src/services/composite_factors.py)，
    `indicator_service.compute_indicators`（技术指标图）与
    `strategy_backtester.compute_composite_signals`（Auto Tune 回测引擎）都调用
    同一份代码，保证图表标记、复合评分与回测信号逐位一致。
@@ -26,7 +26,8 @@
    与现有信号语义一致，次日开盘成交假设不变）。
 3. **opt-in 权重**：每个新因子一组阈值键（触发水平 + 权重），权重为整数点数，
    默认 0 = 不参与评分。经典代际 A–D 的调参范围（`TUNABLE_SCOPES`）只包含
-   经典键，新因子权重恒为默认 0，因此 A–D 结果与改造前完全一致。
+   经典键，新因子权重恒为默认 0，因此经典信号公式保持不变。回测成交会计与
+   寻优方法另有版本，信号一致不代表历史绩效或推荐参数不变（见第 9 节）。
 4. **满分动态化**：`max_buy_score = 10 + 启用因子权重和`（SELL 同理），
    由 API 下发 `max_buy_score` / `max_sell_score`，前端直接渲染，无硬编码。
 
@@ -107,5 +108,105 @@ BOLL/CCI/DMI/MFI 同时产生图表触发标记 `boll_buy/sell`、`cci_buy/sell`
   `SAMPLED_CANDIDATES` 或 `TUNABLE_GRID` 网格。
 - **满分语义**：旧客户端若硬编码满分 10 会显示不一致；当前 Web 端已改用
   API 的 `max_buy_score` / `max_sell_score`。
-- 回滚：删除扩展因子相关提交即可，经典路径（A–D、旧 8 触发器、阈值面板）
-  无行为变化，无需数据迁移。
+- 多因子扩展回滚需同步还原共享公式、API 字段和 Web 阈值控件；无数据库迁移。
+  回测方法更新的兼容性和回滚见下一节。
+
+## 9. 回测会计与验证方法 v2
+
+响应新增 `methodology_version=2`。旧结果的退出成本、敞口、基准收益和
+Fine Tune 选窗依据存在错误，必须重新运行；新旧结果不能作为同口径绩效比较。
+Web 保留旧结果、方案及其运行设置，但提示重新运行后才能应用寻优参数。
+
+### 成交、权益与敞口
+
+- 退出费用只在 `close_trade` 中扣一次；入场成本计入买价。
+- 初始资金 `initial_equity=1.0` 在首根 bar 之前确定；每天一个权益点，
+  末日强制平仓后更新最后一点。总收益、CAGR、首日收益、最大回撤
+  与累计收益图都基于初始资金，避免除以首日收盘权益抵消入场成本。
+- 买入持有在区间首日开盘买入、末日收盘卖出，计算约定与策略相同。
+  因首日涨跌及买入成本，基准累计收益图的第一个点不一定为 0%。
+- `exposure_pct` 累计存在盘中持仓的交易日，不在平仓时清零；
+  老持仓开盘即卖出的当天不计入，盘中止损当天计入。这是日线近似。
+- 入场 ATR 只取上一根已收盘 bar；初始止损在入场当天生效。
+  移动止盈使用持仓期间最高收盘价，从下一根 bar 生效。
+  固定止损与移动止盈同时有效时取较高退出价，跳空穿越按开盘价成交。
+
+### 训练、滚动验证与保留测试
+
+1. 先预留历史尾部最终测试段。裁剪历史后仍须满足最低 600 根日线。
+2. 普通 Auto Tune 最后一个 fold 保持原训练/验证边界；最多再从训练历史中
+   向前构建两个不重叠的验证块，每块长度至少为
+   `max(原验证段长度, 252, 3 × entry_gap_bars)`，前面至少留 60 根训练日线。
+   每个 fold 的训练终点早于自身验证起点，后续训练可包含更早 fold 的验证历史。
+3. 每个 fold 独立进行随机搜索、训练集邻域搜索和 Top-K 验证，最终参数采用
+   最新 fold 的选择。Top-K 来自全部随机候选与爬山候选的去重集合，避免重复
+   参数夸大原有 `param_robustness` 平台比例。
+   信号缓存只保留当前代际/验证折的候选，避免多窗口扫描持续累积大数组。
+4. 代际比较使用 `median(fold validation score) - std(fold validation score)`，
+   仍按 0.05 容忍度优先选择简单代际。返回实际 fold 边界与离散程度；
+   历史不足时使用较少 fold，不声称单 fold 结果有跨时期一致性。
+   同时报告正收益 fold 数、最差 CAGR 与满足交易数门槛的 fold 数；
+   没有合格 fold 时推荐原因标为证据不足，而非宣称基线已经足够。
+5. Fine Tune 的滑动训练窗口统一使用同一验证范围。只有验证期足够长时才
+   分为多个向前验证块，每块至少 `max(252, 3 × entry_gap_bars)` 根；
+   普通长度历史通常只有一个 Fine Tune 验证块。后续 fold 的训练从选中窗口
+   起点扩展至前一个验证块末尾。窗口、代际、参数只依据验证分数选择，
+   最终胜出窗口单独执行一次测试模拟。
+6. 所有自动选择先完成，再生成测试报告。普通 A–F 的固定参数测试结果用于
+   描述性对比，测试分数、置信区间与基准不参与自动推荐。
+
+查看测试结果后继续手动选择代际、改设置并反复运行，会把保留测试用于
+人工选择；程序内隔离不能消除这种偏差。重叠的 Fine Tune 窗口也不是独立样本。
+
+### 目标与不确定性
+
+目标函数改为以下成本后指标，保留最低交易次数门槛：
+
+```text
+0.60 × clamp(Sharpe, -3, 3)
++ 0.40 × clamp(CAGR百分数 / 25, -2, 2)
+- 0.60 × abs(最大回撤百分数) / 100
+```
+
+不再叠加 Sortino、盈亏比、胜率和平均单笔收益，也不再追求固定每年 4 笔。
+这些指标仍用于展示。换手成本已在成交中计入，不再重复扣费。
+最低交易数为 `max(3, round(区间年数))`；不满足时返回不合格分数。
+
+`test_confidence`（Fine Tune 为 `final_test.confidence`）仅在固定参数测试完成后
+对每日净收益做 400 次圆形块 bootstrap，块长为 `ceil(n ** (1/3))`。
+返回 Sharpe 的 95% 百分位区间、有效重采样次数、块长及正 Sharpe 重采样占比。
+圆形块保留块内时间关联并允许尾首环绕，方法背景见
+[arch 时间序列 bootstrap 文档](https://bashtage.github.io/arch/bootstrap/timeseries-bootstraps.html)。
+这是对已观察路径的条件性描述，不是未来获利概率，不修正多重调参偏差；
+未实现 Deflated Sharpe。少于 60 根日线、少于 3 笔交易、零方差或无效权益时，
+返回 `available=false` 和原因，不生成看似精确的区间。
+
+### API、显示和验证
+
+- Fine Tune `sweep` 使用 `validation_score`、`validation_cagr`、
+  `validation_sharpe`、`validation_max_dd`、`validation_trades`。
+  验证 CAGR/Sharpe 是各 fold 中位数，回撤取最差 fold，交易数为 fold 合计。
+  兼容保留的旧 `test_*` 字段为 `null`，不能将验证绩效伪装成测试绩效。
+- `selection_basis=validation`；`final_test` 包含胜出窗口及代际标识、
+  `metrics`、`equity` 和 `confidence`。Web 柱图按验证分数绘制，
+  验证明细与最终测试摘要分开显示，中英文使用同一语义。
+- 现有策略、阈值与风险字段保持；新诊断字段通过 API schema 保留。
+  Electron 使用同一 Web 前端，不需要改变桌面端协议或启动入口。
+- 没有新增环境变量、数据库结构、外部行情服务或模型调用。
+- 建议验收命令：
+
+```bash
+python -m pytest tests/test_strategy_backtester.py tests/test_indicator_service.py tests/test_indicator_optimizer_validation.py tests/test_backtest_statistics.py tests/test_auto_tune_api_contract.py -m "not network"
+cd apps/dsa-web
+npm run lint
+npm run build
+npm test -- src/components/history/__tests__/StockIndicatorChart.test.tsx src/api/__tests__/stocks.test.ts
+```
+
+确定性回归覆盖费用、信号退出、入场日止损、跟踪止损、跳空、终端清仓、
+敞口累计、基准收益与图表一致、最终测试扰动不改变推荐，以及 API 字段保留。
+
+多股票/行业共用参数、市场状态归因、AI YAML 技能版本与历史推荐归因、
+局部参数热图仍需后续独立设计，不能从单股票复合评分结果推导这些统计。
+回滚需同步还原后端、API schema、Web 类型/显示/版本判断并保留用户方案；
+无需数据库迁移，但回滚会恢复旧方法缺陷，已有 v2 结果应另存备查。

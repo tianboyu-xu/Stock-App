@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 策略可靠性组件审查：统一图表与回测的自定义指标周期；行情门禁严格处理交易日历失败、非有限数值、OHLC 越界、负成交量和乱序日期；执行与风控拒绝非法输入并按最高允许入场价测算仓位。
+- [修复] 信号/持仓/参数注册表使用 SQLite 写事务防止并发重复；预览可携最终元数据确认，终态不可复活，通知失败留痕且 HOLD 不发可执行通知，参数回滚保留原祖先链。
+- [文档] 明确信号可靠性当前为组件实现，尚未接入生产调度、参数晋升验证与纸面交易；补充兼容性、投递边界和回滚说明，见 `docs/strategy-signal-reliability.md`。
+
+- [修复] Auto Tune 回测方法升级至 v2：修复退出成本重复扣除、持仓敞口清零、末日清仓权益遗漏及买入持有首日收益/成本抵消；ATR 改用入场前已完成日线，入场日止损生效，多重止损按较高有效退出价成交。
+- [改进] Auto Tune 增加按数据规模构建的滚动验证，以验证分数中位数减离散程度比较代际；Fine Tune 统一验证范围并仅按验证分数选窗，最终胜出参数独立测试，修复选窗读取测试 CAGR 的数据泄漏；候选去重并从完整训练候选池取 Top-K。
+- [改进] Auto Tune 简化目标为 Sharpe、成本后 CAGR 与最大回撤，移除固定每年 4 笔的频率目标和相关指标重复奖励；新增最终测试 Sharpe 圆形块 bootstrap 置信区间及证据不足标识。
+- [修复] Auto Tune Web 与 API 区分 Fine Tune 验证指标和最终测试结果，旧回测结果与方案保留但须重新运行才能应用；中英文显示同步更新，回测方法、兼容性与验证说明见 `docs/auto-tune-strategy.md`。
 - [新功能] Web 首页新增信号摘要板块：作为启动默认视图展示在价格图上方，表格汇总全部自选股及有触发信号的股票代码，7 天内买卖触发以浅绿/浅红标注、3 天内以加粗绿/红标注，点击股票代码可直接打开最新分析详情（与自选股列表行为一致）。
 - [改进] Web 首页摘要板块改用综合评分阈值触发：逐只自选股查询指标接口 `composite.buySignal/sellSignal` 序列取最近触发（与技术指标图同一阈值语义，优先使用各股票已保存的阈值），摘要项改为仅展示股票代码的卡片样式（无公司名、无触发列/时间列），全部平铺展示无滚动条，点击卡片打开最新分析详情（与自选股行为一致）。
 - [新功能] Web 首页摘要新增当前持仓表：可通过加号记录股票、买入日期、买入价、数量和账户（Robinhood/RSU/401K/HSA），持仓行支持编辑股票代码和股份数量（独立股份列）并可拖拽股票调整顺序；新增总价、紧邻股票列的同账户占比、最后触发日期/价格（含买入/卖出方向，即使触发已超出着色窗口也会保留方向）和可选时间窗口的持仓收益图；自动获取现价并计算盈亏金额、盈亏比例与税后 CAGR，代码颜色跟随摘要买卖触发，非自选或补查失败的持仓也会单独补查触发；记录保存在浏览器本地，Robinhood/RSU 持有不足一年按 35%、满一年按 15% 的估算税率计税，401K/HSA 按 0% 计税，亏损不计税；长期收益图按窗口显示月/年刻度。
@@ -107,6 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 将 Responses 渠道的协议、模型 provider、公开 route alias 与 wire-model 构造收敛为统一路由契约，保存校验、运行时加载、状态诊断、选股入口和 Web 编辑器共同使用当前安装的 LiteLLM provider registry，拒绝 `openai` 协议下显式非 OpenAI provider 的模型、拒绝同一 alias 混用 Chat/Responses，并保留 OpenAI-compatible 网关自有的带斜杠模型 ID。
 - [新功能] Auto Tune 触发策略扩展为多因子：新增 BOLL %B、CCI、DMI/ADX、MFI、成交量确认与 52 周位置六类扩展因子（全部由现有日线 OHLCV 计算，不引入新数据源），复合评分按权重并入（默认权重 0，经典四代 A–D 信号逐位不变），新增代际 E「多因子评分」与 F「多因子 + 风控」；技术指标图新增 BOLL/CCI/DMI/MFI 触发组（标记/图例/开关）、扩展因子阈值面板与双语明细标签，指标接口新增 16 个阈值查询参数，详见 docs/auto-tune-strategy.md。
 - [文档] 新增 docs/auto-tune-strategy.md：扩展因子定义、触发规则、代际 E/F、权重语义、阈值默认值与免费外部数据源评估结论。
+- [新功能] 新增 macOS 一键启动 WebUI：双击 `Start-WebUI.command` 自动完成 Python 3.10+ 检查、`.venv`/依赖/`.env` 初始化并以前台方式运行 `python main.py --serve-only`，服务就绪后自动打开浏览器；等价终端命令为 `bash scripts/start-webui-macos.sh`，中英文说明见 `docs/full-guide.md` / `docs/full-guide_EN.md`。
+- [改进] macOS 一键启动的浏览器自动打开改为跟随服务进程生命周期的轮询（最长 30 分钟），覆盖首次 pip 依赖与前端自动构建的长等待；服务崩溃或退出时轮询任务随即回收，不残留后台进程。
+- [修复] 修复 `python main.py --serve-only` 启动即失败（`启动 FastAPI 服务失败: name 'GeminiAnalyzer' is not defined`）：`src/core/market_review.py` 中 `GeminiAnalyzer` 仅在 `TYPE_CHECKING` 下导入，却被用在运行时求值的函数注解中导致 `import api.app` 抛 `NameError`，现改为字符串注解；该问题阻塞 WebUI 服务启动与一键启动后的浏览器自动打开。
+- [新功能] 实盘信号可靠性 P0 组件（未接入生产调度）：新增共享策略引擎（`src/services/strategy_scoring.py` 纯打分公式唯一实现 + `src/services/strategy_engine.py` 代际/评估入口），回测（`strategy_backtester`）、图表（`indicator_service`）、寻优（`indicator_optimizer`，`GENERATIONS` 已迁移至引擎并重导出）三路同源；新增行情数据质量门禁（`market_data_quality.py`：新鲜度/未完结 K 线/OHLCV 非法/重复时间戳，CONFIRMED 才可执行）；新增信号事件持久化与幂等去重（`signal_events` 表 + `signal_event_service.py`，确定性 signal_id，重复执行不重发）；回测记账与 Fine Tune 隔离经确定性测试复核无回归（v2 记账修复保持有效）。
+- [新功能] 实盘信号可靠性 P1 组件（未完成生产编排）：新增持仓状态机（`strategy_position_states` 表 + `trading_state_service.py`，FLAT/ENTRY_SIGNALLED/ENTRY_PENDING/LONG/EXIT_SIGNALLED/EXIT_PENDING，重启保持）；新增共用执行政策（`execution_policy.py`，次日开盘 + 可选 `max_entry_gap_atr` 间隙保护 + 过期拒绝，回测 `simulate_trades` 默认关闭、启用后同规则并记入 `skipped_entries`）；新增风险引擎（`risk_engine.py`，固定风险测算 + 个股/行业/组合三层上限，只计算不下单）；新增参数注册表（`strategy_parameter_sets` 表 + `parameter_registry.py`，CANDIDATE/SHADOW/APPROVED/PRODUCTION/RETIRED，显式晋升/回滚，信号记录精确 `ps-<id>`）。纸面交易、生产看板与 Auto Tune 自动写候选尚未接线，见报告后续步骤。
 
 ## [3.29.0] - 2026-08-02
 

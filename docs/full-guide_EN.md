@@ -1399,6 +1399,10 @@ FastAPI provides RESTful API service for configuration management and triggering
 | `python main.py --serve` | Start API service + run full analysis once |
 | `python main.py --serve-only` | Start API service only, manually trigger analysis |
 
+### One-click startup on macOS
+
+Double-click `Start-WebUI.command` in the repository root from Finder (you can drag it to the Dock as a persistent icon). Terminal then checks for Python 3.10+, prepares `.venv` / dependencies / `.env`, runs `python main.py --serve-only` in the foreground (logs stay visible, Ctrl+C stops it), and opens the WebUI in your default browser once the service is ready. The equivalent terminal command is `bash scripts/start-webui-macos.sh`. On first run without Python 3.10+, the script tells you to run `brew install python@3.12` and retry; if the `static/` frontend bundle is missing and Node is not installed, the home page shows a build guide while the API keeps working.
+
 ### Features
 
 - **Configuration Management** - View/modify watchlist

@@ -222,7 +222,7 @@ class AutoTuneParams(BaseModel):
 
 
 class AutoTuneEquitySeries(BaseModel):
-    """测试段累计收益序列（相对段首归一化为 0%）"""
+    """测试段累计收益序列（相对初始资金，包含首日收益与交易成本）"""
 
     dates: List[str] = Field(default_factory=list, description="交易日日期 (YYYY-MM-DD)")
     values: List[float] = Field(default_factory=list, description="累计收益 (%)，与 dates 一一对应")
@@ -243,6 +243,18 @@ class AutoTuneStrategyResult(BaseModel):
         description="train/validation/test/train_validation 各区间绩效",
     )
     objectives: Dict[str, float] = Field(default_factory=dict, description="各区间目标函数得分")
+    validation_score: Optional[float] = Field(None, description="验证折目标函数中位数减去标准差")
+    validation_score_median: Optional[float] = Field(None, description="验证折目标函数中位数")
+    validation_score_dispersion: Optional[float] = Field(None, description="验证折目标函数总体标准差")
+    validation_positive_folds: Optional[int] = Field(None, description="CAGR 为正的验证折数")
+    validation_worst_cagr_pct: Optional[float] = Field(None, description="验证折中最差 CAGR (%)")
+    validation_eligible_folds: Optional[int] = Field(None, description="达到最少交易数要求的验证折数")
+    validation_folds: List[Dict[str, Any]] = Field(
+        default_factory=list, description="按时间推进的训练/验证区间及逐折绩效、目标函数"
+    )
+    test_confidence: Optional[Dict[str, Any]] = Field(
+        None, description="固定策略测试收益的分块重采样 Sharpe 区间；不是未来盈利概率"
+    )
     param_robustness: Optional[float] = Field(
         None, description="训练集最优邻域内候选的验证集达标比例（0~1）"
     )
@@ -314,18 +326,24 @@ class AutoTuneResponse(BaseModel):
     """Auto Tune 参数寻优响应
 
     方法：历史数据 → 训练集寻优 → 验证集选型 → 测试集仅报告，
-    目标函数平衡收益/回撤/Sharpe/交易质量/频率，而非单纯最大化收益。
+    目标函数平衡限幅 Sharpe、归一化 CAGR 和最大回撤，跨验证折使用中位数减标准差。
     """
 
+    methodology_version: Optional[int] = Field(
+        None, description="寻优与回测口径版本；缺失或旧版本结果需重新运行后才能应用"
+    )
     window_days: int = Field(..., description="两次买入之间的最小间隔天数")
     history: Dict[str, Any] = Field(..., description="实际使用的历史数据范围")
     split: Dict[str, Any] = Field(..., description="train/validation/test 区间划分")
+    walk_forward: Optional[Dict[str, Any]] = Field(
+        None, description="按时间推进的验证折、评分聚合方式及最终参数来源"
+    )
     assumptions: Dict[str, Any] = Field(..., description="回测假设（执行价、成本、窗口等）")
     fixed_parameters: Dict[str, Any] = Field(
         ..., description="固定不参与寻优的指标周期参数及原因"
     )
     strategies: List[AutoTuneStrategyResult] = Field(
-        default_factory=list, description="A/B/C/D 四代策略对比结果"
+        default_factory=list, description="各代策略对比结果；测试绩效仅用于选型完成后的报告"
     )
     benchmarks: List[AutoTuneBenchmark] = Field(
         default_factory=list,
@@ -337,5 +355,9 @@ class AutoTuneResponse(BaseModel):
     recommended: AutoTuneRecommended = Field(..., description="最终推荐参数")
     fine_tune: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Fine Tune 滑动窗口扫描结果（未启用时为 None）"
+        description=(
+            "Fine Tune 滑动窗口扫描结果（未启用时为 None）；selection_basis=validation，"
+            "sweep 使用 validation_* 指标及 validation_score，旧 test_* 字段为 null；"
+            "final_test 单独报告最终选中策略的 strategy_key/position_index/metrics/equity"
+        )
     )

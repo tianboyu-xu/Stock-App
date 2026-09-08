@@ -832,9 +832,9 @@ def auto_tune_stock(
     """
     Auto Tune 参数寻优
 
-    流程：历史数据 -> 训练集寻优 -> 验证集选型 -> 测试集仅报告，
+    流程：历史数据 -> 滚动训练/验证 -> 冻结普通与 Fine Tune 选择 -> 测试集仅报告，
     避免用测试期选择参数，也避免只按历史收益最大化选参。
-    测试段长度由 test_years 指定（默认 5 年），训练/验证在剩余
+    测试段长度由 test_years 指定（默认 3 年），训练/验证在剩余
     历史按 60:20 相对比例划分；train_start_date/train_end_date
     可选，用于把训练段裁剪到指定日期范围。
     附三个同窗口基准（标普500 买入持有 / 个股买入持有 /
@@ -845,7 +845,7 @@ def auto_tune_stock(
         stock_code: 股票代码
         window_days: 两次买入之间的最小间隔天数（默认 90）
         years: 回测历史年数（默认 10 年，最多 20 年）
-        test_years: 样本外测试段年数（默认 5 年）
+        test_years: 样本外测试段年数（默认 3 年）
         train_start_date: 训练段起始日期（可选）
         train_end_date: 训练段结束日期（可选）
         fine_tune_window_days: Fine Tune 滑动训练窗口天数（可选）

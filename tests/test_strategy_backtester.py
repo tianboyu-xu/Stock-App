@@ -205,6 +205,126 @@ def test_atr_stop_exits_at_stop_level():
     assert trade["return_pct"] < 0
 
 
+@pytest.mark.parametrize("cost_pct", [0.0, 1.0])
+@pytest.mark.parametrize("exit_reason", ["signal", "stop", "trail", "segment_end"])
+def test_exit_paths_charge_each_side_once_and_reconcile_equity(cost_pct, exit_reason):
+    bars = _flat_bars(25)
+    sells = (22,) if exit_reason == "signal" else ()
+    if exit_reason == "signal":
+        bars[23].update(open=11.0, high=11.06, low=10.0, close=11.0)
+    elif exit_reason in {"stop", "trail"}:
+        bars[23].update(low=8.0, close=9.0)
+    else:
+        bars[24].update(high=11.06, close=11.0)
+    cost = cost_pct / 100.0
+    entry = 10.0 * (1.0 + cost)
+    raw_exit = {
+        "signal": 11.0,
+        "stop": entry - 3.0 * 0.12,
+        "trail": 10.0 - 3.0 * 0.12,
+        "segment_end": 11.0,
+    }[exit_reason]
+    simulation = simulate_trades(
+        prepare_base_series(bars), _manual_signals(len(bars), buys=(20,), sells=sells),
+        0, len(bars) - 1, window_days=1, cost_pct_per_side=cost_pct,
+        stop_multiple_atr=3.0 if exit_reason == "stop" else None,
+        trail_multiple_atr=3.0 if exit_reason == "trail" else None,
+    )
+    trade, = simulation["trades"]
+    expected_equity = raw_exit * (1.0 - cost) / entry
+    assert trade["exit_reason"] == exit_reason
+    assert trade["entry_price"] == pytest.approx(entry)
+    assert trade["exit_price"] == pytest.approx(raw_exit * (1.0 - cost), abs=1e-4)
+    assert trade["return_pct"] == pytest.approx((expected_equity - 1.0) * 100.0, abs=1e-4)
+    assert simulation["equity"][-1] == pytest.approx(expected_equity)
+    assert simulation["initial_equity"] == 1.0
+    metrics = summarize_metrics(simulation, 0, len(bars) - 1, 0.0, 0.0)
+    assert metrics["total_return_pct"] == trade["return_pct"]
+    assert metrics["after_tax_total_return_pct"] == trade["return_pct"]
+    expected_holding = {"signal": 2, "stop": 3, "trail": 3, "segment_end": 4}[exit_reason]
+    assert simulation["holding_bars"] == expected_holding
+
+
+@pytest.mark.parametrize("exit_reason", ["stop", "trail"])
+def test_gap_through_exit_level_fills_at_open_with_one_exit_fee(exit_reason):
+    bars = _flat_bars(25)
+    bars[23].update(open=9.0, high=9.1, low=8.9, close=9.0)
+    simulation = simulate_trades(
+        prepare_base_series(bars), _manual_signals(len(bars), buys=(20,)),
+        0, len(bars) - 1, window_days=1, cost_pct_per_side=0.1,
+        stop_multiple_atr=1.0 if exit_reason == "stop" else None,
+        trail_multiple_atr=1.0 if exit_reason == "trail" else None,
+    )
+    trade, = simulation["trades"]
+    assert trade["exit_reason"] == exit_reason
+    assert trade["exit_date"] == bars[23]["date"]
+    assert trade["exit_price"] == pytest.approx(9.0 * 0.999)
+    assert simulation["equity"][-1] == pytest.approx(9.0 * 0.999 / (10.0 * 1.001))
+    assert simulation["holding_bars"] == 2  # Entry day + next day; gap exits at the open.
+
+
+def test_atr_stop_uses_only_information_available_before_entry_open():
+    bars = _flat_bars(25)
+    # The entry-day high is unknown at entry and must not widen the fixed stop.
+    bars[21].update(high=15.0, low=9.99)
+    bars[22].update(low=9.8, close=9.9)
+    base = prepare_base_series(bars)
+    assert base["atr"][21] > base["atr"][20]
+    simulation = simulate_trades(
+        base, _manual_signals(len(bars), buys=(20,)), 0, len(bars) - 1,
+        window_days=1, cost_pct_per_side=0.0, stop_multiple_atr=1.0,
+    )
+    trade, = simulation["trades"]
+    assert trade["exit_date"] == bars[22]["date"]
+    assert trade["exit_reason"] == "stop"
+    assert trade["exit_price"] == pytest.approx(9.88)
+
+
+def test_initial_stop_protects_entry_day_and_counts_intraday_exposure():
+    bars = _flat_bars(25)
+    bars[21].update(low=9.0, close=9.5)
+    simulation = simulate_trades(
+        prepare_base_series(bars), _manual_signals(len(bars), buys=(20,)),
+        0, len(bars) - 1, window_days=1, cost_pct_per_side=0.0, stop_multiple_atr=1.0,
+    )
+    trade, = simulation["trades"]
+    assert trade["entry_date"] == trade["exit_date"] == bars[21]["date"]
+    assert trade["exit_reason"] == "stop"
+    assert trade["exit_price"] == pytest.approx(9.88)
+    assert trade["bars_held"] == 0
+    assert simulation["holding_bars"] == 1
+    assert simulation["equity"][21] == pytest.approx(0.988)
+
+
+def test_trailing_stop_uses_prior_close_and_precedes_lower_fixed_stop():
+    bars = _flat_bars(25)
+    # Entry-day low precedes a close-based trailing level becoming active.
+    bars[21].update(high=12.1, low=9.95, close=12.0)
+    bars[22].update(open=12.0, high=12.1, low=9.0, close=9.5)
+    simulation = simulate_trades(
+        prepare_base_series(bars), _manual_signals(len(bars), buys=(20,)),
+        0, len(bars) - 1, window_days=1, cost_pct_per_side=0.0,
+        stop_multiple_atr=3.0, trail_multiple_atr=3.0,
+    )
+    trade, = simulation["trades"]
+    assert trade["exit_date"] == bars[22]["date"]
+    assert trade["exit_reason"] == "trail"
+    assert trade["exit_price"] == pytest.approx(12.0 - 3.0 * 0.12)
+
+
+def test_exposure_accumulates_across_closed_and_terminal_trades():
+    bars = _flat_bars(15)
+    simulation = simulate_trades(
+        prepare_base_series(bars), _manual_signals(len(bars), buys=(1, 7, 12), sells=(4, 9)),
+        0, len(bars) - 1, window_days=1, cost_pct_per_side=0.1,
+    )
+    assert len(simulation["trades"]) == 3
+    assert simulation["holding_bars"] == 3 + 2 + 2
+    assert simulation["equity"][-1] == pytest.approx((0.999 / 1.001) ** 3)
+    metrics = summarize_metrics(simulation, 0, len(bars) - 1)
+    assert metrics["exposure_pct"] == pytest.approx(7 / 15 * 100.0, abs=1e-4)
+
+
 def test_objective_score_penalizes_too_few_trades_and_drawdown():
     base_metrics = {
         "total_return_pct": 30.0,
@@ -444,6 +564,57 @@ def test_simulate_buy_hold_matches_window_prices():
     )
 
 
+@pytest.mark.parametrize("cost_pct", [0.0, 0.1, 1.0])
+def test_buy_hold_and_strategy_share_entry_and_liquidation_accounting(cost_pct):
+    bars = _flat_bars(5)
+    bars[1].update(high=11.5, close=11.0)
+    bars[4].update(high=12.5, close=12.0)
+    base = prepare_base_series(bars)
+    strategy = simulate_trades(
+        base, _manual_signals(len(bars), buys=(0,)), 0, 4,
+        window_days=1, cost_pct_per_side=cost_pct,
+    )
+    buy_hold = simulate_buy_hold(base, 1, 4, cost_pct_per_side=cost_pct)
+    assert strategy["equity"][1:] == pytest.approx(buy_hold["equity"])
+    for key in ("entry_price", "exit_price", "return_pct", "bars_held"):
+        assert strategy["trades"][0][key] == buy_hold["trades"][0][key]
+    strategy_metrics = summarize_metrics(strategy, 0, 4)
+    buy_hold_metrics = summarize_metrics(buy_hold, 1, 4)
+    assert strategy_metrics["total_return_pct"] == buy_hold_metrics["total_return_pct"]
+    assert strategy_metrics["max_drawdown_pct"] == buy_hold_metrics["max_drawdown_pct"]
+    assert buy_hold_metrics["exposure_pct"] == 100.0
+
+
+def test_buy_hold_metrics_include_first_bar_return_costs_and_initial_drawdown():
+    bars = _make_bars([90.0, 90.0, 99.0])
+    bars[0].update(open=100.0, high=100.0)
+    simulation = simulate_buy_hold(prepare_base_series(bars), 0, 2, cost_pct_per_side=1.0)
+    final_equity = 99.0 * 0.99 / 101.0
+    assert simulation["equity"] == pytest.approx([90.0 / 101.0, 90.0 / 101.0, final_equity])
+    metrics = summarize_metrics(simulation, 0, 2, 0.0, 0.0)
+    assert metrics["total_return_pct"] == pytest.approx((final_equity - 1.0) * 100.0, abs=1e-4)
+    assert metrics["cagr_pct"] == pytest.approx((final_equity ** (252 / 3) - 1.0) * 100, abs=1e-4)
+    assert metrics["max_drawdown_pct"] == pytest.approx((90.0 / 101.0 - 1.0) * 100.0, abs=1e-4)
+    returns = [90.0 / 101.0 - 1.0, 0.0, 99.0 * 0.99 / 90.0 - 1.0]
+    mean_r = sum(returns) / 3
+    std_r = math.sqrt(sum((r - mean_r) ** 2 for r in returns) / 3)
+    down_std = math.sqrt(sum(min(r, 0.0) ** 2 for r in returns) / 3)
+    assert metrics["sharpe"] == pytest.approx(mean_r / std_r * math.sqrt(252), abs=1e-4)
+    assert metrics["sortino"] == pytest.approx(mean_r / down_std * math.sqrt(252), abs=1e-4)
+
+
+def test_single_bar_buy_hold_reports_both_costs_and_intraday_return():
+    bars = _make_bars([110.0])
+    bars[0]["open"] = 100.0
+    simulation = simulate_buy_hold(prepare_base_series(bars), 0, 0, cost_pct_per_side=1.0)
+    expected = 110.0 * 0.99 / 101.0
+    assert simulation["equity"] == pytest.approx([expected])
+    assert simulation["holding_bars"] == 1
+    assert summarize_metrics(simulation, 0, 0)["total_return_pct"] == pytest.approx(
+        (expected - 1.0) * 100.0, abs=1e-4,
+    )
+
+
 def _ramp_bars(n, start_price, step):
     bars = []
     current = date(2020, 1, 1)
@@ -524,6 +695,7 @@ def test_run_auto_tune_includes_benchmarks_and_after_tax_metrics():
         assert len(equity["dates"]) == test_bars
         assert len(equity["values"]) == len(equity["dates"])
         assert equity["values"][0] == pytest.approx(0.0, abs=1e-9)
+        assert equity["values"][-1] == pytest.approx(strategy["metrics"]["test"]["total_return_pct"])
 
     stock_equity = by_key["stock_buy_hold"]["test_equity"]
     assert stock_equity is not None
@@ -583,7 +755,9 @@ def test_strategy_on_sp500_test_segment_uses_dedicated_test_backtest():
         assert equity is not None
         assert len(equity["dates"]) == test_end - test_start + 1
         assert len(equity["values"]) == len(equity["dates"])
-        assert equity["values"][0] == pytest.approx(0.0, abs=1e-9)
+        initial_return = (1.0 / 1.001 - 1.0) * 100.0 if key.endswith("buy_hold") else 0.0
+        assert equity["values"][0] == pytest.approx(initial_return, abs=1e-4)
+        assert equity["values"][-1] == pytest.approx(by_key[key]["metrics"]["test"]["total_return_pct"])
 
 
 def test_trigger_benefits_include_extra_groups():

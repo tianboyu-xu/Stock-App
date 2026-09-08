@@ -1169,6 +1169,111 @@ class DecisionSignalFeedbackRecord(Base):
     updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
 
 
+class SignalEventRecord(Base):
+    """Persistent production signal event with duplicate protection.
+
+    ``signal_id`` is a deterministic SHA256 over
+    (ticker, strategy_version, parameter_set_id, signal bar, action):
+    re-running the signal job on the same finalized data returns the
+    existing row instead of creating a duplicate alert.
+    """
+
+    __tablename__ = 'signal_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    signal_id = Column(String(64), nullable=False, unique=True, index=True)
+    ticker = Column(String(32), nullable=False, index=True)
+    strategy_id = Column(String(32), nullable=False, index=True)
+    strategy_version = Column(String(32), nullable=False, index=True)
+    parameter_set_id = Column(String(64), nullable=False, index=True)
+    bar_timestamp = Column(String(16), nullable=False, index=True)
+    action = Column(String(16), nullable=False, index=True)
+    score = Column(Integer)
+    threshold = Column(Integer)
+    signal_strength = Column(Float)
+    provider = Column(String(64))
+    adjustment_mode = Column(String(32))
+    data_timestamp = Column(String(16))
+    data_hash = Column(String(64))
+    factors_json = Column(Text)
+    status = Column(String(16), nullable=False, default='CONFIRMED', index=True)
+    details = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+    __table_args__ = (
+        Index('ix_signal_events_ticker_status_time', 'ticker', 'status', 'created_at'),
+        Index('ix_signal_events_strategy_id_version', 'strategy_id', 'strategy_version'),
+    )
+
+
+class StrategyPositionStateRecord(Base):
+    """Persistent long-only position state per (ticker, strategy, parameters).
+
+    Lets the live signal path know whether a strategy already holds a
+    position, so repeated scheduler runs cannot stack duplicate entries.
+    Survives application restarts (stored in the app database).
+    """
+
+    __tablename__ = 'strategy_position_states'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(32), nullable=False, index=True)
+    strategy_id = Column(String(32), nullable=False, index=True)
+    strategy_version = Column(String(32), nullable=False, index=True)
+    parameter_set_id = Column(String(64), nullable=False, index=True)
+    state = Column(String(16), nullable=False, default='FLAT', index=True)
+    entry_signal_id = Column(String(64))
+    entry_bar_date = Column(String(16))
+    entry_price = Column(Float)
+    exit_signal_id = Column(String(64))
+    details = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'ticker', 'strategy_id', 'strategy_version', 'parameter_set_id',
+            name='uix_strategy_position_scope',
+        ),
+    )
+
+
+class StrategyParameterSetRecord(Base):
+    """Versioned strategy parameter sets with an explicit promotion chain.
+
+    Auto Tune writes CANDIDATE rows only; PRODUCTION changes exclusively
+    through ``ParameterRegistry.promote_to_production`` (explicit user
+    action), with the previous production row kept as RETIRED for rollback.
+    """
+
+    __tablename__ = 'strategy_parameter_sets'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope_key = Column(String(64), nullable=False, index=True)
+    strategy_generation = Column(String(8), nullable=False, index=True)
+    parameters_json = Column(Text, nullable=False)
+    training_start = Column(String(16))
+    training_end = Column(String(16))
+    validation_start = Column(String(16))
+    validation_end = Column(String(16))
+    test_start = Column(String(16))
+    test_end = Column(String(16))
+    train_metrics_json = Column(Text)
+    validation_metrics_json = Column(Text)
+    test_metrics_json = Column(Text)
+    robustness_score = Column(Float)
+    status = Column(String(16), nullable=False, default='CANDIDATE', index=True)
+    parent_id = Column(Integer)
+    note = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, onupdate=utc_naive_now, index=True)
+
+    __table_args__ = (
+        Index('ix_strategy_params_scope_gen_status', 'scope_key', 'strategy_generation', 'status'),
+    )
+
+
 class SkillOpinionSampleRecord(Base):
     """Immutable, low-sensitivity skill opinion sample for Issue #1904 P2 PR1."""
 

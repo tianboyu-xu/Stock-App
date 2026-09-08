@@ -152,6 +152,9 @@ export interface StockIndicatorsResponse {
 
 export type AutoTuneSegmentKey = 'train' | 'validation' | 'test' | 'trainValidation';
 
+// Increment with backend selection/accounting changes; persisted results are not migrated.
+export const AUTO_TUNE_METHODOLOGY_VERSION = 2;
+
 export interface AutoTuneSegmentMetrics {
   totalReturnPct: number;
   cagrPct: number;
@@ -180,6 +183,33 @@ export interface AutoTuneEquitySeries {
   values: number[];
 }
 
+export interface AutoTuneTestConfidence {
+  available: boolean;
+  reason: string | null;
+  method: string;
+  confidenceLevel: number;
+  bars: number;
+  blockLength: number;
+  resamples: number;
+  validResamples: number;
+  sharpeCiLower: number | null;
+  sharpeCiUpper: number | null;
+  positiveSharpeFraction: number | null;
+}
+
+export interface AutoTuneDateRange {
+  startDate: string;
+  endDate: string;
+  bars: number;
+}
+
+export interface AutoTuneValidationFold {
+  train: AutoTuneDateRange;
+  validation: AutoTuneDateRange;
+  metrics: AutoTuneSegmentMetrics;
+  score: number;
+}
+
 export interface AutoTuneStrategyResult {
   key: string;
   nameZh: string;
@@ -190,6 +220,14 @@ export interface AutoTuneStrategyResult {
   params: AutoTuneParams;
   metrics: Record<AutoTuneSegmentKey | string, AutoTuneSegmentMetrics>;
   objectives: Record<string, number>;
+  validationScore?: number | null;
+  validationScoreMedian?: number | null;
+  validationScoreDispersion?: number | null;
+  validationPositiveFolds?: number | null;
+  validationWorstCagrPct?: number | null;
+  validationEligibleFolds?: number | null;
+  validationFolds?: AutoTuneValidationFold[];
+  testConfidence?: AutoTuneTestConfidence | null;
   paramRobustness: number | null;
   testEquity: AutoTuneEquitySeries | null;
 }
@@ -230,7 +268,32 @@ export interface AutoTuneRecommended {
   paramsDisplay: AutoTuneParamDisplay[];
 }
 
-export interface FineTuneSweepPosition {
+export interface FineTuneValidationMetrics {
+  validationCagr: number;
+  validationSharpe: number;
+  validationMaxDd: number;
+  validationTrades: number;
+  validationScore: number;
+  validationScoreDispersion?: number;
+  validationFolds?: number;
+  /** Legacy fields are null: sweep positions never inspect the final test set. */
+  testCagr?: number | null;
+  testSharpe?: number | null;
+  testMaxDd?: number | null;
+  testTrades?: number | null;
+  thresholds: Record<string, number>;
+  stopMultipleAtr: number | null;
+  trailMultipleAtr: number | null;
+}
+
+export interface FineTuneStrategyResult extends FineTuneValidationMetrics {
+  key: string;
+  nameZh: string;
+  nameEn: string;
+  tuned: boolean;
+}
+
+export interface FineTuneSweepPosition extends FineTuneValidationMetrics {
   positionIndex: number;
   trainStart: string;
   trainEnd: string;
@@ -238,26 +301,35 @@ export interface FineTuneSweepPosition {
   validationStart: string;
   validationEnd: string;
   bestStrategyKey: string;
-  testCagr: number;
-  testSharpe: number;
-  testMaxDd: number;
-  testTrades: number;
-  validationScore: number;
-  thresholds: Record<string, number>;
-  stopMultipleAtr: number | null;
-  trailMultipleAtr: number | null;
-  allStrategies: AutoTuneStrategyResult[];
+  allStrategies: FineTuneStrategyResult[];
 }
 
 export interface FineTuneResult {
+  selectionBasis: 'validation';
+  validationFolds?: AutoTuneDateRange[];
+  aggregation?: string;
   windowDays: number;
   step: number;
   positionsTested: number;
   bestPositionIndex: number;
   sweep: FineTuneSweepPosition[];
+  finalTest: {
+    strategyKey: string;
+    positionIndex: number;
+    metrics: AutoTuneSegmentMetrics;
+    equity: AutoTuneEquitySeries;
+    confidence?: AutoTuneTestConfidence;
+  };
 }
 
 export interface AutoTuneResponse {
+  methodologyVersion?: number | null;
+  walkForward?: {
+    folds: { train: AutoTuneDateRange; validation: AutoTuneDateRange }[];
+    aggregation: string;
+    parameterSource: string;
+    minimumExtraValidationBars: number;
+  } | null;
   windowDays: number;
   history: {
     bars: number;

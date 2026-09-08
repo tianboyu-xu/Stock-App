@@ -174,7 +174,7 @@ def _resolve_market_review_regions(raw_region: Optional[str]) -> list[str]:
 
 def run_market_review(
     notifier: NotificationService,
-    analyzer: Optional[GeminiAnalyzer] = None,
+    analyzer: Optional["GeminiAnalyzer"] = None,
     search_service: Optional[SearchService] = None,
     config: Optional[object] = None,
     send_notification: bool = True,

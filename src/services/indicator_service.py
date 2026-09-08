@@ -18,10 +18,14 @@ import math
 from typing import Any, Dict, List, Optional, Sequence
 
 from src.services.composite_factors import (
-    FACTOR_BREAKDOWN_KEYS,
     ExtraFactorScorer,
     compute_extra_factor_series,
     compute_extra_triggers,
+)
+from src.services.strategy_scoring import (
+    BarFeatures,
+    score_bar,
+    signal_enter,
 )
 
 # Excel "Today" 工作表第 52 行的默认阈值
@@ -413,9 +417,6 @@ def compute_indicators(
     buy_threshold = int(th["composite_buy_threshold"])
     sell_threshold = int(th["composite_sell_threshold"])
     momentum_period = max(1, int(th["momentum_period"]))
-    momentum_min_change_pct = float(
-        th["momentum_min_change_pct"]
-    )
 
     # ------------------------------------------------------------
     # 价格动量 / 动量改善
@@ -478,139 +479,59 @@ def compute_indicators(
     extra_scorer = ExtraFactorScorer(factor_series, close, volume, th)
 
     for i in range(n):
-        bd: Dict[str, int] = {
-            "macd": 0, "kdj": 0, "rsi": 0, "regime": 0, "momentum": 0,
-            **{key: 0 for key in FACTOR_BREAKDOWN_KEYS},
-        }
-        sd: Dict[str, int] = dict(bd)
-        b = 0
-        s = 0
-
         # MACD 归一化：滚动窗口百分位（仅使用当前 bar 之前的数据，
-        # 且要求完整回看窗口，避免早期样本过少导致百分位失真）
+        # 且要求完整回看窗口，避免早期样本过少导致百分位失真）。
+        # 评分公式本身由 strategy_scoring.score_bar 唯一实现，
+        # 此处仅组装单 bar 特征并委托打分（与回测引擎同源）。
         if i >= lookback:
             macd_pct = _percentile_rank(macd[i - lookback:i], macd[i])
             macd_rising = macd[i] > macd[i - 1]
             macd_falling = macd[i] < macd[i - 1]
-
-            # 深跌低位 + 向上反转
-            if (
-                macd_pct is not None
-                and macd_pct <= th["macd_low_percentile"]
-                and macd_rising
-            ):
-                bd["macd"] = 2
-                b += 2
-
-            # 高位 + 向下反转
-            if (
-                macd_pct is not None
-                and macd_pct >= th["macd_high_percentile"]
-                and macd_falling
-            ):
-                sd["macd"] = 2
-                s += 2
-
-        # KDJ 超卖金叉 / 超买死叉
-        if i >= 1 and None not in (k_values[i], d_values[i], k_values[i - 1], d_values[i - 1]):
-            golden_cross = (
-                k_values[i] > d_values[i]  # type: ignore[operator]
-                and k_values[i - 1] <= d_values[i - 1]  # type: ignore[operator]
-            )
-            death_cross = (
-                k_values[i] < d_values[i]  # type: ignore[operator]
-                and k_values[i - 1] >= d_values[i - 1]  # type: ignore[operator]
-            )
-            if (
-                k_values[i] < th["kdj_low"]  # type: ignore[operator]
-                and d_values[i] < th["kdj_low"]  # type: ignore[operator]
-                and golden_cross
-            ):
-                bd["kdj"] = 2
-                b += 2
-            if (
-                k_values[i] > th["kdj_high"]  # type: ignore[operator]
-                and d_values[i] > th["kdj_high"]  # type: ignore[operator]
-                and death_cross
-            ):
-                sd["kdj"] = 2
-                s += 2
-
-        # RSI 极端 + 反转（快速平滑 RSI 转向）
-        if i >= 1 and None not in (rsi[i], rsi6[i], rsi6[i - 1]):
-            rsi_turning_up = rsi6[i] > rsi6[i - 1]  # type: ignore[operator]
-            rsi_turning_down = rsi6[i] < rsi6[i - 1]  # type: ignore[operator]
-            if rsi[i] < th["rsi_low"] and rsi_turning_up:  # type: ignore[operator]
-                bd["rsi"] = 2
-                b += 2
-            if rsi[i] > th["rsi_high"] and rsi_turning_down:  # type: ignore[operator]
-                sd["rsi"] = 2
-                s += 2
-
-        # 长期趋势 regime：价格相对趋势均线 + 均线方向（各 0-1 分，BUY/SELL 对称）
-        if sma_trend[i] is not None:
-            if close[i] > sma_trend[i]:  # type: ignore[operator]
-                bd["regime"] += 1
-                b += 1
-            elif close[i] < sma_trend[i]:  # type: ignore[operator]
-                sd["regime"] += 1
-                s += 1
-
-            if i >= 1 and sma_trend[i - 1] is not None:
-                if sma_trend[i] > sma_trend[i - 1]:  # type: ignore[operator]
-                    bd["regime"] += 1
-                    b += 1
-                elif sma_trend[i] < sma_trend[i - 1]:  # type: ignore[operator]
-                    sd["regime"] += 1
-                    s += 1
-
-        # ------------------------------------------------------------
-        # 动量改善 / 恶化
-        #
-        # BUY：ROC 正在改善 且 当日收盘高于昨日收盘
-        # SELL：ROC 正在恶化 且 当日收盘低于昨日收盘
-        # ------------------------------------------------------------
-        delta = momentum_delta[i]
-
-        if delta is not None:
-
-            if (
-                delta > momentum_min_change_pct
-                and i >= 1
-                and close[i] > close[i - 1]
-            ):
-                bd["momentum"] = 2
-                b += 2
-
-            elif (
-                delta < -momentum_min_change_pct
-                and i >= 1
-                and close[i] < close[i - 1]
-            ):
-                sd["momentum"] = 2
-                s += 2
-
-        # 扩展因子（BOLL/CCI/DMI/MFI/量能/52 周位置）：权重 0 时零贡献
+        else:
+            macd_pct = None
+            macd_rising = False
+            macd_falling = False
         extra_buy, extra_sell, extra_bd, extra_sd = extra_scorer.score_at(i)
-        b += extra_buy
-        s += extra_sell
-        bd.update(extra_bd)
-        sd.update(extra_sd)
-
-        buy_score[i] = b
-        sell_score[i] = s
-        buy_breakdown[i] = bd
-        sell_breakdown[i] = sd
+        scored = score_bar(
+            BarFeatures(
+                macd_pct=macd_pct,
+                macd_rising=macd_rising,
+                macd_declining=macd_falling,
+                k=k_values[i],
+                d=d_values[i],
+                k_prev=k_values[i - 1] if i >= 1 else None,
+                d_prev=d_values[i - 1] if i >= 1 else None,
+                rsi=rsi[i],
+                rsi6=rsi6[i],
+                rsi6_prev=rsi6[i - 1] if i >= 1 else None,
+                close=close[i],
+                close_prev=close[i - 1] if i >= 1 else None,
+                sma_trend=sma_trend[i],
+                sma_trend_prev=sma_trend[i - 1] if i >= 1 else None,
+                momentum_delta=momentum_delta[i],
+                extra_buy=extra_buy,
+                extra_sell=extra_sell,
+                extra_buy_breakdown=extra_bd,
+                extra_sell_breakdown=extra_sd,
+            ),
+            th,
+        )
+        buy_score[i] = scored.buy
+        sell_score[i] = scored.sell
+        buy_breakdown[i] = scored.buy_breakdown
+        sell_breakdown[i] = scored.sell_breakdown
 
         # 信号仅在评分“进入”阈值区间的那根 bar 触发，保持图表整洁；
         # 同一根 bar 买卖同时进入区间时视为方向不明，不产生任何标记。
         prev_buy = buy_score[i - 1] if i > 0 else 0
         prev_sell = sell_score[i - 1] if i > 0 else 0
-        buy_enter = b >= buy_threshold and prev_buy < buy_threshold
-        sell_enter = s >= sell_threshold and prev_sell < sell_threshold
-        if buy_enter and not sell_enter:
+        buy_enter, sell_enter = signal_enter(
+            prev_buy, scored.buy, prev_sell, scored.sell,
+            buy_threshold, sell_threshold,
+        )
+        if buy_enter:
             buy_signal[i] = close[i]
-        elif sell_enter and not buy_enter:
+        elif sell_enter:
             sell_signal[i] = close[i]
 
     extra_max = extra_scorer.max_extra()

@@ -201,7 +201,7 @@ def get_market_now(
 
 
 def get_effective_trading_date(
-    market: Optional[str], current_time: Optional[datetime] = None
+    market: Optional[str], current_time: Optional[datetime] = None, *, strict: bool = False
 ) -> date:
     """
     Resolve the latest reusable daily-bar date for checkpoint/resume logic.
@@ -210,17 +210,21 @@ def get_effective_trading_date(
     - Non-trading day / holiday: previous trading session
     - Trading day before market close: previous completed trading session
     - Trading day after market close: current trading session
-    - Calendar lookup failure: fail-open to market-local natural date
+    - Calendar lookup failure: natural date for legacy callers; strict=True raises.
     """
     market_now = get_market_now(market, current_time=current_time)
     fallback_date = market_now.date()
 
     if not _XCALS_AVAILABLE:
+        if strict:
+            raise RuntimeError("Trading calendar is unavailable")
         return fallback_date
 
     ex = MARKET_EXCHANGE.get(market or "")
     tz_name = MARKET_TIMEZONE.get(market or "")
     if not ex or not tz_name:
+        if strict:
+            raise ValueError(f"Unknown market: {market}")
         return fallback_date
 
     try:
@@ -244,6 +248,8 @@ def get_effective_trading_date(
 
         return cal.previous_session(session).date()
     except Exception as e:
+        if strict:
+            raise RuntimeError("Cannot resolve completed trading session") from e
         logger.warning("trading_calendar.get_effective_trading_date fail-open: %s", e)
         return fallback_date
 

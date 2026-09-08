@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { stocksApi } from '../../../api/stocks';
+import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneResponse } from '../../../api/stocks';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
 import { UI_LANGUAGE_STORAGE_KEY } from '../../../utils/uiLanguage';
 import { StockIndicatorChart } from '../StockIndicatorChart';
@@ -148,6 +148,7 @@ const equityDates = ['2024-01-02', '2024-03-01', '2024-06-03', '2024-09-02', '20
 
 function buildAutoTuneResponse() {
   return {
+    methodologyVersion: AUTO_TUNE_METHODOLOGY_VERSION,
     windowDays: 90,
     history: {
       bars: 2400,
@@ -316,6 +317,205 @@ describe('StockIndicatorChart auto tune panel', () => {
 
     const lastCall = vi.mocked(stocksApi.autoTune).mock.calls.at(-1);
     expect(lastCall?.[0]).toBe('600519');
+  });
+
+  it('shows validation scores and metrics for sweep positions, with the final test separate', async () => {
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    response.fineTune = {
+      selectionBasis: 'validation',
+      windowDays: 360,
+      step: 72,
+      positionsTested: 2,
+      bestPositionIndex: 1,
+      sweep: [0, 1].map((positionIndex) => ({
+        positionIndex,
+        trainStart: '2018-01-02',
+        trainEnd: '2019-01-02',
+        trainBars: 252,
+        validationStart: '2019-01-03',
+        validationEnd: '2019-04-03',
+        bestStrategyKey: 'A',
+        validationCagr: 21 + positionIndex,
+        validationSharpe: 1.1,
+        validationMaxDd: -6,
+        validationTrades: 4,
+        validationScore: positionIndex === 0 ? -0.45 : 1.23,
+        testCagr: null,
+        testSharpe: null,
+        testMaxDd: null,
+        testTrades: null,
+        thresholds: {},
+        stopMultipleAtr: null,
+        trailMultipleAtr: null,
+        allStrategies: response.strategies.map((strategy) => ({
+          key: strategy.key,
+          nameZh: strategy.nameZh,
+          nameEn: strategy.nameEn,
+          tuned: strategy.tuned,
+          validationCagr: 21 + positionIndex,
+          validationSharpe: 1.1,
+          validationMaxDd: -6,
+          validationTrades: 4,
+          validationScore: positionIndex === 0 ? -0.45 : 1.23,
+          thresholds: strategy.params.thresholds,
+          stopMultipleAtr: strategy.params.stopMultipleAtr,
+          trailMultipleAtr: strategy.params.trailMultipleAtr,
+        })),
+      })),
+      finalTest: {
+        strategyKey: 'A',
+        positionIndex: 1,
+        metrics: { ...segmentMetrics, cagrPct: 42 },
+        equity: response.strategies[0].testEquity!,
+      },
+    };
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    await runAutoTuneAndGetPlot();
+
+    const sweepChart = screen.getByRole('img', { name: '各窗口位置验证评分对比' });
+    expect(within(sweepChart).getByText('-0.45')).toBeInTheDocument();
+    expect(within(sweepChart).getByText('1.23')).toBeInTheDocument();
+    expect(sweepChart.textContent).not.toContain('%');
+    expect(screen.getByTestId('fine-tune-final-test')).toHaveTextContent('CAGR: 42%');
+    expect(screen.getByTestId('fine-tune-final-test')).toHaveTextContent('#2');
+
+    fireEvent.click(screen.getByRole('button', { name: /各窗口明细/ }));
+    const table = screen.getByRole('columnheader', { name: '验证 CAGR' }).closest('table')!;
+    expect(within(table).getByText('21.0%')).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: '验证评分' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: '验证范围' })).toBeInTheDocument();
+    expect(table.textContent).not.toContain('42%');
+  });
+
+  it('preserves legacy cached settings but blocks applying or saving the outdated result until rerun', async () => {
+    const legacyResult = {
+      ...buildAutoTuneResponse(),
+      methodologyVersion: undefined,
+      fineTune: { sweep: [{ positionIndex: 0, testCagr: 100 }] },
+    };
+    const settings = {
+      transactionWindow: 120,
+      autoTuneYears: 15,
+      autoTuneTestYears: 3,
+      trainRangePct: null,
+      fineTuneEnabled: false,
+      fineTuneDays: 360,
+    };
+    window.localStorage.setItem('dsa.autotune.600519', JSON.stringify({
+      result: legacyResult,
+      selectedStrategyKey: 'C',
+      settings,
+    }));
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    expect(screen.getByRole('alert')).toHaveTextContent('请重新运行 Auto Tune');
+    expect(screen.getByRole('button', { name: '应用选中到图表' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存为方案' })).toBeDisabled();
+    expect(screen.queryByRole('img', { name: '各窗口位置验证评分对比' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('交易窗口', { exact: false })).toHaveValue(120);
+    expect(screen.getByLabelText('历史', { exact: false })).toHaveValue(15);
+    const beforeApply = vi.mocked(stocksApi.getIndicators).mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: '应用选中到图表' }));
+    expect(vi.mocked(stocksApi.getIndicators).mock.calls).toHaveLength(beforeApply);
+    expect(JSON.parse(window.localStorage.getItem('dsa.autotune.600519')!).settings).toEqual(settings);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Auto Tune' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '应用选中到图表' })).toBeEnabled();
+    expect(JSON.parse(window.localStorage.getItem('dsa.autotune.600519')!).result.methodologyVersion)
+      .toBe(AUTO_TUNE_METHODOLOGY_VERSION);
+  });
+
+  it('keeps an incompatible saved preset loadable with an English warning and preserves it after rerun', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const preset = {
+      id: 'legacy',
+      name: 'Old strategy',
+      timestamp: 1,
+      result: { ...buildAutoTuneResponse(), methodologyVersion: 1 },
+      selectedStrategyKey: 'C',
+      settings: {
+        transactionWindow: 180,
+        autoTuneYears: 12,
+        autoTuneTestYears: 3,
+        trainRangePct: null,
+        fineTuneEnabled: false,
+        fineTuneDays: 360,
+      },
+    };
+    window.localStorage.setItem('dsa.autotune.presets', JSON.stringify([preset]));
+    renderChart();
+    const option = await screen.findByRole('option', { name: 'Old strategy · rerun required' });
+    fireEvent.change(option.closest('select')!, { target: { value: 'legacy' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('rerun Auto Tune');
+    expect(screen.getByRole('button', { name: 'Apply selected to chart' })).toBeDisabled();
+    expect(screen.getByLabelText('Trade window', { exact: false })).toHaveValue(180);
+    fireEvent.click(screen.getByRole('button', { name: 'Auto Tune' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(JSON.parse(window.localStorage.getItem('dsa.autotune.presets')!)).toEqual([preset]);
+  });
+
+  it('explains cross-fold validation and conditional test uncertainty, including insufficient evidence', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const fold = {
+      train: response.split.train,
+      validation: response.split.validation,
+      metrics: segmentMetrics,
+      score: 0.5,
+    };
+    response.walkForward = {
+      folds: [fold, fold],
+      aggregation: 'median_objective_minus_population_stddev',
+      parameterSource: 'latest_fold',
+      minimumExtraValidationBars: 270,
+    };
+    const confidence = {
+      available: true,
+      reason: null,
+      method: 'circular_block_bootstrap',
+      confidenceLevel: 0.95,
+      bars: 480,
+      blockLength: 8,
+      resamples: 400,
+      validResamples: 400,
+      sharpeCiLower: -0.4,
+      sharpeCiUpper: 1.7,
+      positiveSharpeFraction: 0.75,
+    };
+    response.strategies[0] = {
+      ...response.strategies[0],
+      validationScore: 0.5,
+      validationScoreDispersion: 0.1,
+      validationPositiveFolds: 1,
+      validationEligibleFolds: 2,
+      validationWorstCagrPct: -4,
+      validationFolds: [fold, fold],
+      testConfidence: confidence,
+    };
+    response.strategies[1].testConfidence = {
+      ...confidence,
+      available: false,
+      reason: 'insufficient_trades',
+      sharpeCiLower: null,
+      sharpeCiUpper: null,
+      positiveSharpeFraction: null,
+    };
+    response.recommended.reasonCode = 'insufficient_validation_trades';
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    await screen.findAllByText('Baseline A');
+    expect(screen.getByText(/Selection uses 2 chronological/)).toBeInTheDocument();
+    expect(screen.getByText(/Positive validation folds 1\/2/)).toHaveTextContent('Worst validation CAGR -4%');
+    expect(screen.getByText(/No validation fold meets the trade minimum/)).toBeInTheDocument();
+    expect(screen.getByTestId('test-confidence')).toHaveTextContent('95% block bootstrap interval: -0.4 to 1.7');
+    expect(screen.getByTestId('test-confidence')).toHaveTextContent('It is not a probability of future profit');
+    const secondRow = screen.getAllByText('Trend B').find((el) => el.closest('tr'))!.closest('tr')!;
+    fireEvent.click(secondRow);
+    expect(screen.getByTestId('test-confidence')).toHaveTextContent('Insufficient final-test evidence');
+    expect(screen.getByTestId('test-confidence')).not.toHaveTextContent('95%');
   });
 
   it('shows a hover tooltip with the date and per-series values', async () => {

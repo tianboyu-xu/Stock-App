@@ -5,16 +5,13 @@
 
 为技术指标图 "Auto Tune" 提供确定性的历史回测：
 
-1. `prepare_base_series` 一次性计算与阈值无关的基础指标序列
-   （公式与 indicator_service 完全一致，复用其 SMA/EMA/滚动窗口函数）。
-2. `compute_composite_signals` 按给定阈值复刻 indicator_service 的复合
-   BUY/SELL 评分逻辑（MACD 滚动百分位 + KDJ 反转 + RSI 反转 + 趋势
-   regime + 价格动量改善/恶化 + 扩展因子 BOLL/CCI/DMI/MFI/量能/52 周
-   位置，扩展因子权重默认 0、公式与 indicator_service 共享同一模块），
-   使用有序窗口加速百分位计算（窗口
-   不含当前 bar 且要求完整回看窗口），信号仅在评分进入阈值区间的
-   bar 触发（同 bar 双向进入视为方向不明、不触发），结果与
-   compute_indicators 一致。
+1. `prepare_base_series`（位于 strategy_engine）一次性计算与阈值无关的
+   基础指标序列（公式与 indicator_service 完全一致，复用其
+   SMA/EMA/滚动窗口函数）。
+2. `compute_composite_signals` 委托 strategy_engine 的共享评分实现
+   （MACD 滚动百分位 + KDJ 反转 + RSI 反转 + 趋势 regime +
+   价格动量改善/恶化 + 扩展因子 BOLL/CCI/DMI/MFI/量能/52 周位置），
+   结果与 compute_indicators 一致。
 3. `simulate_trades` 按 "信号收盘确认、次日开盘成交" 的执行假设模拟
    交易：默认最多每 window_days 根交易日一次买入；C/D 策略叠加
    ATR 止损与 ATR 移动止盈（盘中触发按止损价成交，跳空按开盘价）。
@@ -29,20 +26,14 @@
 from __future__ import annotations
 
 import math
-from bisect import bisect_left, bisect_right, insort
-from typing import Any, Dict, List, Optional, Sequence
+from bisect import bisect_left
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from src.services.composite_factors import (
-    ExtraFactorScorer,
-    compute_extra_factor_series,
+from src.services.strategy_engine import (
+    evaluate_signals,
+    prepare_base_series,  # noqa: F401 兼容性重新导出：optimizer/测试仍从本模块导入
 )
-from src.services.indicator_service import (
-    DEFAULT_THRESHOLDS,
-    _ema,
-    _rolling_max,
-    _rolling_min,
-    _sma,
-)
+from src.services.execution_policy import DECISION_EXECUTE, evaluate_entry
 
 TRADING_DAYS_PER_YEAR = 252
 # 单边交易成本（佣金+滑点近似），用于策略比较，非投资建议。
@@ -61,348 +52,22 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def prepare_base_series(bars: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """一次性计算与阈值无关的指标序列（公式与 indicator_service 一致）。"""
-    n = len(bars)
-    dates = [str(b.get("date", "")) for b in bars]
-    close = [float(b["close"]) for b in bars]
-    high = [float(b["high"]) for b in bars]
-    low = [float(b["low"]) for b in bars]
-    volume = [float(b.get("volume") or 0.0) for b in bars]
-
-    ema12 = _ema(close, 12)
-    ema26 = _ema(close, 26)
-    macd = [(ema12[i] or 0.0) - (ema26[i] or 0.0) for i in range(n)]
-    macd_signal = _ema(macd, 9)
-
-    # KDJ(9,3,3)，与 indicator_service 相同的 RSV/K/D 递推。
-    low_min9 = _rolling_min(low, 9)
-    high_max9 = _rolling_max(high, 9)
-    k_values: List[Optional[float]] = [None] * n
-    d_values: List[Optional[float]] = [None] * n
-    k_prev = 50.0
-    d_prev = 50.0
-    for i in range(n):
-        if low_min9[i] is None or high_max9[i] is None:
-            continue
-        denom = high_max9[i] - low_min9[i]  # type: ignore[operator]
-        rsv = 50.0 if denom == 0 else (close[i] - low_min9[i]) / denom * 100.0  # type: ignore[operator]
-        k_cur = rsv / 3.0 + k_prev * 2.0 / 3.0
-        d_cur = k_cur / 3.0 + d_prev * 2.0 / 3.0
-        k_values[i] = k_cur
-        d_values[i] = d_cur
-        k_prev = k_cur
-        d_prev = d_cur
-
-    # RSI(14) 与 RSI6（RSI 的 6 日均值），Excel 口径。
-    gains: List[float] = [0.0] * n
-    losses: List[float] = [0.0] * n
-    for i in range(1, n):
-        if close[i] > close[i - 1]:
-            gains[i] = (close[i] - close[i - 1]) / close[i - 1]
-        elif close[i] < close[i - 1]:
-            losses[i] = (close[i - 1] - close[i]) / close[i - 1]
-    rsi: List[Optional[float]] = [None] * n
-    for i in range(n):
-        if i < 14:
-            continue
-        sum_gain = sum(gains[i - 14: i])
-        sum_loss = sum(losses[i - 14: i])
-        avg_gain = (sum_gain / 14.0 * 13.0 + gains[i]) / 14.0
-        avg_loss = (sum_loss / 14.0 * 13.0 + losses[i]) / 14.0
-        rsi[i] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-
-    def _avg_opt(values: Sequence[Optional[float]], period: int) -> List[Optional[float]]:
-        out: List[Optional[float]] = []
-        for i in range(len(values)):
-            if i + 1 < period:
-                out.append(None)
-                continue
-            window = values[i + 1 - period: i + 1]
-            if any(v is None for v in window):
-                out.append(None)
-            else:
-                out.append(sum(v for v in window if v is not None) / period)
-        return out
-
-    rsi6 = _avg_opt(rsi, 6)
-
-    # Wilder ATR(14)：前 14 根 TR 均值播种，之后递推平滑。
-    atr: List[Optional[float]] = [None] * n
-    trs: List[float] = []
-    for i in range(n):
-        if i == 0:
-            trs.append(high[i] - low[i])
-            continue
-        trs.append(max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1]),
-        ))
-    prev_atr: Optional[float] = None
-    for i in range(n):
-        if i + 1 < 14:
-            continue
-        if prev_atr is None:
-            prev_atr = sum(trs[: i + 1]) / 14.0
-        else:
-            prev_atr = (prev_atr * 13.0 + trs[i]) / 14.0
-        atr[i] = prev_atr
-
-    sma200 = _sma(close, 200)
-    vol_sma20 = _sma(volume, 20)
-
-    # 扩展因子序列（BOLL/CCI/DMI/MFI/量能/52 周位置），与 indicator_service 共享公式
-    factor_series = compute_extra_factor_series(close, high, low, volume)
-
-    return {
-        "n": n,
-        "dates": dates,
-        "open": [float(b["open"]) for b in bars],
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-        "macd": macd,
-        "macd_signal": macd_signal,
-        "k": k_values,
-        "d": d_values,
-        "rsi": rsi,
-        "rsi6": rsi6,
-        "atr": atr,
-        "sma200": sma200,
-        "vol_sma20": vol_sma20,
-        "factor_series": factor_series,
-    }
-
-
 def compute_composite_signals(
     base: Dict[str, Any],
     thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, List[Any]]:
     """按 indicator_service 复合评分逻辑计算 BUY/SELL 信号。
 
-    与 compute_indicators 的 composite 输出保持一致；MACD 滚动百分位用
-    有序窗口实现（窗口仅含当前 bar 之前的数据且要求完整回看窗口，
-    等价于逐窗 `_percentile_rank`），复杂度 O(n log w)。
+    本函数是兼容性入口：评分公式的唯一实现位于
+    strategy_engine.evaluate_signals（经 score_bar 逐 bar 决策），
+    此处仅做委托并保持历史返回结构（分数 + 触发信号）不变。
     """
-    th = dict(DEFAULT_THRESHOLDS)
-    if thresholds:
-        for key, value in thresholds.items():
-            if key in th and value is not None:
-                try:
-                    th[key] = float(value)
-                except (TypeError, ValueError):
-                    pass
-
-    n = base["n"]
-    close: List[float] = base["close"]
-    macd: List[float] = base["macd"]
-    k_values: List[Optional[float]] = base["k"]
-    d_values: List[Optional[float]] = base["d"]
-    rsi: List[Optional[float]] = base["rsi"]
-    rsi6: List[Optional[float]] = base["rsi6"]
-    volume: List[float] = base.get("volume", [0.0] * n)
-    # 扩展因子序列优先取 prepare_base_series 的共享结果；缺失时按同口径
-    # 现场补算（保证与 indicator_service 的 parity 仍然成立）。
-    factor_series = base.get("factor_series") or compute_extra_factor_series(
-        base["close"], base["high"], base["low"], volume
-    )
-    extra_scorer = ExtraFactorScorer(factor_series, close, volume, th)
-
-    lookback = max(2, int(th["macd_lookback"]))
-    trend_period = max(2, int(th["trend_period"]))
-    sma_trend = _sma(close, trend_period)
-
-    buy_score: List[int] = [0] * n
-    sell_score: List[int] = [0] * n
-    buy_signal: List[Optional[float]] = [None] * n
-    sell_signal: List[Optional[float]] = [None] * n
-
-    # 有序窗口维护 MACD 滚动百分位（窗口仅含当前 bar 之前的数据，
-    # 等价于 count(v <= current) / len(prior_window) * 100）。
-    window_sorted: List[float] = []
-    buy_threshold = int(th["composite_buy_threshold"])
-    sell_threshold = int(th["composite_sell_threshold"])
-    kdj_low = th["kdj_low"]
-    kdj_high = th["kdj_high"]
-    rsi_os = th["rsi_low"]
-    rs_ob = th["rsi_high"]
-    macd_low_pct = th["macd_low_percentile"]
-    macd_high_pct = th["macd_high_percentile"]
-    momentum_period = max(1, int(th["momentum_period"]))
-    momentum_min_change_pct = float(
-        th["momentum_min_change_pct"]
-    )
-
-    # ------------------------------------------------------------
-    # 价格动量 / 动量改善（与 indicator_service 保持一致）
-    #
-    # momentum_pct:
-    #     近 N 根涨跌幅 ROC（%）。
-    #
-    # momentum_delta:
-    #     ROC 相对上一根 bar 的变化。
-    #
-    # BUY 需同时满足：动量正在改善 且 当日价格确实在上涨。
-    # SELL 需同时满足：动量正在恶化 且 当日价格确实在下跌。
-    # ------------------------------------------------------------
-
-    momentum_pct: List[Optional[float]] = [None] * n
-
-    for i in range(momentum_period, n):
-
-        prev_close = close[i - momentum_period]
-
-        if prev_close == 0:
-            continue
-
-        momentum_pct[i] = (
-            (close[i] - prev_close)
-            / prev_close
-            * 100.0
-        )
-
-    momentum_delta: List[Optional[float]] = [None] * n
-
-    for i in range(1, n):
-
-        if (
-            momentum_pct[i] is None
-            or momentum_pct[i - 1] is None
-        ):
-            continue
-
-        momentum_delta[i] = (
-            momentum_pct[i]
-            - momentum_pct[i - 1]
-        )  # type: ignore[operator]
-
-    for i in range(n):
-        # 先用“当前 bar 之前”的完整窗口计算百分位，再插入当前值并淘汰过期值
-        # （len(window_sorted) == lookback 等价于 i >= lookback）
-        macd_pct = (
-            bisect_right(window_sorted, macd[i]) * 100.0 / len(window_sorted)
-            if len(window_sorted) >= lookback
-            else None
-        )
-        insort(window_sorted, macd[i])
-        if len(window_sorted) > lookback:
-            expired = macd[i - lookback]
-            del window_sorted[bisect_right(window_sorted, expired) - 1]
-
-        b = 0
-        s = 0
-
-        macd_rising = i >= 1 and macd[i] > macd[i - 1]
-        macd_declining = i >= 1 and macd[i] < macd[i - 1]
-
-        # 深跌低位 + 向上反转 / 高位 + 向下反转
-        if (
-            macd_pct is not None
-            and macd_pct <= macd_low_pct
-            and macd_rising
-        ):
-            b += 2
-        if (
-            macd_pct is not None
-            and macd_pct >= macd_high_pct
-            and macd_declining
-        ):
-            s += 2
-
-        # KDJ 超卖金叉 / 超买死叉
-        if i >= 1 and None not in (k_values[i], d_values[i], k_values[i - 1], d_values[i - 1]):
-            golden_cross = (
-                k_values[i] > d_values[i]  # type: ignore[operator]
-                and k_values[i - 1] <= d_values[i - 1]  # type: ignore[operator]
-            )
-            death_cross = (
-                k_values[i] < d_values[i]  # type: ignore[operator]
-                and k_values[i - 1] >= d_values[i - 1]  # type: ignore[operator]
-            )
-            if (
-                k_values[i] < kdj_low  # type: ignore[operator]
-                and d_values[i] < kdj_low  # type: ignore[operator]
-                and golden_cross
-            ):
-                b += 2
-            if (
-                k_values[i] > kdj_high  # type: ignore[operator]
-                and d_values[i] > kdj_high  # type: ignore[operator]
-                and death_cross
-            ):
-                s += 2
-
-        # RSI 极端 + 反转（快速平滑 RSI 转向）
-        if i >= 1 and None not in (rsi[i], rsi6[i], rsi6[i - 1]):
-            if rsi[i] < rsi_os and rsi6[i] > rsi6[i - 1]:  # type: ignore[operator]
-                b += 2
-            if rsi[i] > rs_ob and rsi6[i] < rsi6[i - 1]:  # type: ignore[operator]
-                s += 2
-
-        # 长期趋势 regime：价格相对趋势均线 + 均线方向（各 0-1 分，BUY/SELL 对称）
-        if sma_trend[i] is not None:
-            if close[i] > sma_trend[i]:  # type: ignore[operator]
-                b += 1
-            elif close[i] < sma_trend[i]:  # type: ignore[operator]
-                s += 1
-
-            if i >= 1 and sma_trend[i - 1] is not None:
-                if sma_trend[i] > sma_trend[i - 1]:  # type: ignore[operator]
-                    b += 1
-                elif sma_trend[i] < sma_trend[i - 1]:  # type: ignore[operator]
-                    s += 1
-
-        # ------------------------------------------------------------
-        # 动量改善 / 恶化（与 indicator_service 保持一致）
-        #
-        # BUY：ROC 正在改善 且 当日收盘高于昨日收盘
-        # SELL：ROC 正在恶化 且 当日收盘低于昨日收盘
-        # ------------------------------------------------------------
-        delta = momentum_delta[i]
-
-        if delta is not None:
-
-            if (
-                delta > momentum_min_change_pct
-                and i >= 1
-                and close[i] > close[i - 1]
-            ):
-                b += 2
-
-            elif (
-                delta < -momentum_min_change_pct
-                and i >= 1
-                and close[i] < close[i - 1]
-            ):
-                s += 2
-
-        # 扩展因子（BOLL/CCI/DMI/MFI/量能/52 周位置）：权重 0 时零贡献，
-        # 与 compute_indicators 的评分公式完全一致（共享 composite_factors）
-        extra_buy, extra_sell, _, _ = extra_scorer.score_at(i)
-        b += extra_buy
-        s += extra_sell
-
-        buy_score[i] = b
-        sell_score[i] = s
-
-        # 信号仅在评分“进入”阈值区间的那根 bar 触发，与 compute_indicators 一致；
-        # 同一根 bar 买卖同时进入区间时视为方向不明，不产生任何标记。
-        prev_buy = buy_score[i - 1] if i > 0 else 0
-        prev_sell = sell_score[i - 1] if i > 0 else 0
-        buy_enter = b >= buy_threshold and prev_buy < buy_threshold
-        sell_enter = s >= sell_threshold and prev_sell < sell_threshold
-        if buy_enter and not sell_enter:
-            buy_signal[i] = close[i]
-        elif sell_enter and not buy_enter:
-            sell_signal[i] = close[i]
-
+    result = evaluate_signals(base, thresholds)
     return {
-        "buy_score": buy_score,
-        "sell_score": sell_score,
-        "buy_signal": buy_signal,
-        "sell_signal": sell_signal,
+        "buy_score": result["buy_score"],
+        "sell_score": result["sell_score"],
+        "buy_signal": result["buy_signal"],
+        "sell_signal": result["sell_signal"],
     }
 
 
@@ -417,6 +82,7 @@ def simulate_trades(
     use_volume_filter: bool = False,
     stop_multiple_atr: Optional[float] = None,
     trail_multiple_atr: Optional[float] = None,
+    max_entry_gap_atr: Optional[float] = None,
 ) -> Dict[str, Any]:
     """在 [start_index, end_index] 区间内模拟交易（其余参数见模块 docstring）。
 
@@ -424,9 +90,16 @@ def simulate_trades(
     - 信号在收盘确认，次日开盘价成交（无同日收盘执行）。
     - 两次买入之间至少间隔 window_days 根交易日（默认 90，即最多约
       一个季度一次往返）。
-    - ATR 止损/移动止盈用入场时的 ATR(14)；盘中跌破按止损价成交，
-      跳空低开按开盘价成交；移动止盈以持仓期间最高收盘价为基准。
+    - ATR 止损/移动止盈用入场前一根已收盘 bar 的 ATR(14)；初始止损
+      从入场当天生效，盘中跌破按止损价成交，跳空低开按开盘价成交。
+      移动止盈以持仓期间最高收盘价为基准，从下一根 bar 生效。
+    - 间隙保护（可选，与实盘共用 execution_policy.evaluate_entry）：
+      ``max_entry_gap_atr`` 为 None 时关闭（保持历史行为）；启用后
+      次日开盘高于 ``信号收盘 + 倍数 * ATR`` 即跳过本次入场并记入
+      ``skipped_entries``（跳过不计入建仓间隔锁定）。
     - 区间结束时仍持仓则按区间最后收盘价强制平仓。
+    - 初始资金为 1，equity 每根 bar 一个收盘权益点，最后一点含平仓成本。
+      holding_bars 累计有盘中持仓的 bar（开盘即平仓的 bar 不计入）。
     """
     close: List[float] = base["close"]
     open_: List[float] = base["open"]
@@ -441,6 +114,7 @@ def simulate_trades(
 
     cost = cost_pct_per_side / 100.0
     trades: List[Dict[str, Any]] = []
+    skipped_entries: List[Dict[str, Any]] = []
     equity = [1.0] * (end_index - start_index + 1)
     realized = 1.0
     holding_bars = 0
@@ -448,12 +122,14 @@ def simulate_trades(
     entry_price = 0.0
     stop_level: Optional[float] = None
     trail_level: Optional[float] = None
+    entry_atr: Optional[float] = None
     highest_close = 0.0
     last_entry_index: Optional[int] = None
 
     def close_trade(exit_i: int, exit_price: float, reason: str) -> None:
-        nonlocal entry_i, entry_price, holding_bars, realized
+        nonlocal entry_i, realized
         assert entry_i is not None
+        # 所有调用方传入未扣费成交价；平仓费用只在这里收取一次。
         net_exit = exit_price * (1.0 - cost)
         trade_return = (net_exit / entry_price - 1.0) * 100.0
         trades.append({
@@ -467,7 +143,6 @@ def simulate_trades(
         })
         realized *= 1.0 + trade_return / 100.0
         entry_i = None
-        holding_bars = 0
 
     pending_entry = False
     pending_exit = False
@@ -478,49 +153,65 @@ def simulate_trades(
         if pending_entry and entry_i is None:
             gap_ok = last_entry_index is None or (i - last_entry_index) >= window_days
             if gap_ok:
-                entry_i = i
-                entry_price = open_[i] * (1.0 + cost)
-                highest_close = close[i]
-                last_entry_index = i
-                atr_here = atr[i]
-                if stop_multiple_atr is not None and atr_here:
-                    stop_level = entry_price - stop_multiple_atr * atr_here
+                entry_atr = atr[i - 1] if i > 0 else None
+                verdict = evaluate_entry(
+                    signal_close=close[i - 1] if i > 0 else open_[i],
+                    next_open=open_[i],
+                    atr=entry_atr,
+                    max_entry_gap_atr=max_entry_gap_atr,
+                )
+                if verdict["decision"] != DECISION_EXECUTE:
+                    skipped_entries.append({
+                        "signal_date": dates[i - 1] if i > 0 else dates[i],
+                        "date": dates[i],
+                        "reason": verdict["reason"],
+                        "signal_close": verdict["signal_close"],
+                        "next_open": verdict["expected_execution"],
+                        "maximum_entry": verdict["maximum_entry"],
+                    })
+                    entry_atr = None
                 else:
-                    stop_level = None
-                if trail_multiple_atr is not None and atr_here:
-                    trail_level = highest_close - trail_multiple_atr * atr_here
-                else:
+                    entry_i = i
+                    entry_price = open_[i] * (1.0 + cost)
+                    highest_close = 0.0
+                    last_entry_index = i
+                    if stop_multiple_atr is not None and entry_atr:
+                        stop_level = entry_price - stop_multiple_atr * entry_atr
+                    else:
+                        stop_level = None
                     trail_level = None
             pending_entry = False
         elif pending_exit and entry_i is not None:
-            close_trade(i, open_[i] * (1.0 - cost), "signal")
+            close_trade(i, open_[i], "signal")
             pending_exit = False
         else:
             pending_entry = False
             pending_exit = False
 
         # ---- 盘中：ATR 止损 / 移动止盈检查（用截至昨日的水平） ----
-        if entry_i is not None and i > entry_i:
-            exit_price: Optional[float] = None
-            if stop_level is not None and low[i] <= stop_level:
-                exit_price = min(open_[i], stop_level)
-                reason = "stop"
-            elif trail_level is not None and low[i] <= trail_level:
-                exit_price = min(open_[i], trail_level)
+        if entry_i is not None:
+            # 多头从上方触及退出价，取最高的有效水平；不能越过较高的
+            # 移动止盈后再按更低的固定止损成交。
+            exit_level = stop_level
+            reason = "stop"
+            if trail_level is not None and (exit_level is None or trail_level > exit_level):
+                exit_level = trail_level
                 reason = "trail"
-            if exit_price is not None:
-                close_trade(i, exit_price * (1.0 - cost), reason)
+            if exit_level is not None and low[i] <= exit_level:
+                # 旧持仓跳空至退出价以下时开盘即平仓；其余退出 bar 有盘中敞口。
+                if i == entry_i or open_[i] > exit_level:
+                    holding_bars += 1
+                close_trade(i, min(open_[i], exit_level), reason)
                 stop_level = None
                 trail_level = None
+            else:
+                holding_bars += 1
 
         # ---- 收盘时刻：更新权益曲线与信号 ----
         if entry_i is not None:
-            holding_bars += 1
             highest_close = max(highest_close, close[i])
-            if trail_multiple_atr is not None:
-                atr_here = atr[entry_i]
-                if atr_here:
-                    trail_level = highest_close - trail_multiple_atr * atr_here
+            if trail_multiple_atr is not None and entry_atr:
+                trail_level = highest_close - trail_multiple_atr * entry_atr
             equity[offset] = realized * (close[i] / entry_price)
             if sell_signal[i] is not None:
                 pending_exit = True
@@ -544,12 +235,15 @@ def simulate_trades(
                     pending_entry = True
 
     if entry_i is not None:
-        close_trade(end_index, close[end_index] * (1.0 - cost), "segment_end")
+        close_trade(end_index, close[end_index], "segment_end")
+        equity[-1] = realized
 
     return {
         "trades": trades,
+        "skipped_entries": skipped_entries,
         "equity": equity,
         "holding_bars": holding_bars,
+        "initial_equity": 1.0,
     }
 
 
@@ -561,8 +255,8 @@ def simulate_buy_hold(
 ) -> Dict[str, Any]:
     """窗口起点开盘买入、终点收盘卖出的买入持有基准。
 
-    输出结构与 simulate_trades 一致（恰好一笔交易），可直接交给
-    summarize_metrics 计算同口径绩效。
+    输出结构与 simulate_trades 一致（恰好一笔交易），初始资金为 1，
+    最后一个权益点为扣除平仓费后的现金，可直接交给 summarize_metrics。
     """
     close: List[float] = base["close"]
     open_: List[float] = base["open"]
@@ -575,6 +269,8 @@ def simulate_buy_hold(
         [close[i] / entry_price for i in range(start_index, end_index + 1)]
         if entry_price > 0 else [1.0] * (end_index - start_index + 1)
     )
+    if equity:
+        equity[-1] = 1.0 + trade_return / 100.0
     return {
         "trades": [{
             "entry_date": dates[start_index],
@@ -587,6 +283,7 @@ def simulate_buy_hold(
         }],
         "equity": equity,
         "holding_bars": len(equity),
+        "initial_equity": 1.0,
     }
 
 
@@ -639,16 +336,17 @@ def summarize_metrics(
     trades: List[Dict[str, Any]] = simulation["trades"]
     seg_len = len(equity)
     years = seg_len / TRADING_DAYS_PER_YEAR if seg_len else 0.0
+    initial_equity = float(simulation.get("initial_equity", 1.0))
 
-    total_return = (equity[-1] / equity[0] - 1.0) * 100.0 if equity else 0.0
+    total_return = (equity[-1] / initial_equity - 1.0) * 100.0 if equity else 0.0
     cagr = 0.0
-    if years > 0 and equity[0] > 0 and equity[-1] > 0:
-        cagr = (math.pow(equity[-1] / equity[0], 1.0 / years) - 1.0) * 100.0
+    if years > 0 and initial_equity > 0 and equity[-1] > 0:
+        cagr = (math.pow(equity[-1] / initial_equity, 1.0 / years) - 1.0) * 100.0
 
     max_dd = 0.0
-    peak = equity[0] if equity else 1.0
+    peak = initial_equity
     daily_returns: List[float] = []
-    prev = equity[0] if equity else 1.0
+    prev = initial_equity
     for value in equity:
         peak = max(peak, value)
         if peak > 0:
@@ -730,12 +428,12 @@ def summarize_metrics(
 def objective_score(metrics: Dict[str, Any], segment_years: float) -> float:
     """平衡型目标函数：不以最大化历史收益为唯一目标。
 
-    组成（权重和约为 1）：
-    - 风险调整收益：Sharpe 0.28 + Sortino 0.12
-    - 收益：CAGR 0.20（25% 年化封顶）、平均单笔 0.10（5% 封顶）
-    - 交易质量：盈亏比 0.15（PF 2.5 封顶）、胜率 0.10（50% 居中）
+    组成：
+    - 风险调整收益：Sharpe 0.60（限制在 -3 至 3）
+    - 成本后收益：CAGR / 25% × 0.40（归一化项限制在 -2 至 2）
     - 回撤惩罚：最大回撤绝对值 × 0.60
-    - 频率项：偏好每年约 4 笔交易，过密或过疏都轻微扣分
+    - 不再重复奖励 Sortino / 盈亏比 / 胜率 / 单笔收益等相关指标
+    - 不设偏好交易频率：换手成本已在成交和权益中计入，避免重复扣费
     - 交易次数低于 min_trades 时直接判为不合格（避免靠极少量运气交易取胜）
     """
     min_trades = max(3, int(round(segment_years)))
@@ -745,22 +443,11 @@ def objective_score(metrics: Dict[str, Any], segment_years: float) -> float:
 
     dd_frac = abs(metrics["max_drawdown_pct"]) / 100.0
     sharpe_term = _clamp(float(metrics["sharpe"]), -3.0, 3.0)
-    sortino_term = _clamp(float(metrics["sortino"]), -3.0, 3.0)
     cagr_term = _clamp(metrics["cagr_pct"] / 25.0, -2.0, 2.0)
-    pf = metrics["profit_factor"] if metrics["profit_factor"] is not None else 0.0
-    pf_term = _clamp(pf - 1.0, -1.0, 1.5)
-    win_term = metrics["win_rate_pct"] / 100.0 - 0.5
-    avg_trade_term = _clamp(metrics["avg_trade_pct"] / 5.0, -2.0, 2.0)
-    freq_term = -abs(_clamp(metrics["trades_per_year"], 0.0, 12.0) - 4.0) / 8.0
 
     score = (
-        0.28 * sharpe_term
-        + 0.12 * sortino_term
-        + 0.20 * cagr_term
-        + 0.15 * pf_term
-        + 0.10 * win_term
-        + 0.10 * avg_trade_term
-        + freq_term
+        0.60 * sharpe_term
+        + 0.40 * cagr_term
         - 0.60 * dd_frac
     )
     return score
