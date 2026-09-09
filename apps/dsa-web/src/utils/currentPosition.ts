@@ -175,3 +175,176 @@ export function writeStoredCurrentPositionsCollapsed(collapsed: boolean): void {
     // Browser storage is best-effort; the toggle remains usable in memory.
   }
 }
+
+export interface ClosedSale {
+  id: string;
+  positionId?: string | null;
+  code: string;
+  name: string;
+  market?: string;
+  purchaseDate: string;
+  purchasePrice: number;
+  quantity: number;
+  sellDate: string;
+  sellPrice: number;
+  profit: number;
+  account: PositionAccount;
+}
+
+export const CLOSED_SALES_STORAGE_KEY = 'dsa.home.closedSales.v1';
+
+export function calculateClosedSaleProfit(
+  purchasePrice: number,
+  sellPrice: number,
+  quantity: number,
+): number | null {
+  const buy = Number(purchasePrice);
+  const sell = Number(sellPrice);
+  const qty = Number(quantity);
+  if (
+    !Number.isFinite(buy)
+    || buy <= 0
+    || !Number.isFinite(sell)
+    || sell <= 0
+    || !Number.isFinite(qty)
+    || qty <= 0
+  ) {
+    return null;
+  }
+  return (sell - buy) * qty;
+}
+
+function isClosedSale(value: unknown): value is ClosedSale {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<ClosedSale>;
+  return (
+    typeof candidate.id === 'string'
+    && typeof candidate.code === 'string'
+    && candidate.code.trim().length > 0
+    && typeof candidate.name === 'string'
+    && typeof candidate.purchaseDate === 'string'
+    && typeof candidate.sellDate === 'string'
+    && (candidate.account === undefined || isPositionAccount(candidate.account))
+    && Number.isFinite(candidate.purchasePrice)
+    && Number(candidate.purchasePrice) > 0
+    && Number.isFinite(candidate.sellPrice)
+    && Number(candidate.sellPrice) > 0
+    && Number.isFinite(candidate.quantity)
+    && Number(candidate.quantity) > 0
+    && Number.isFinite(candidate.profit)
+  );
+}
+
+export function readStoredClosedSales(): ClosedSale[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(CLOSED_SALES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(isClosedSale).map((sale) => ({
+        ...sale,
+        // Sales saved before accounts were backfilled belong to the default taxable account.
+        account: sale.account ?? 'Robinhood',
+      }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function writeStoredClosedSales(sales: ClosedSale[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CLOSED_SALES_STORAGE_KEY, JSON.stringify(sales));
+  } catch {
+    // Browser storage is best-effort; the table remains usable in memory.
+  }
+}
+
+export const TRADE_HISTORY_COLLAPSED_STORAGE_KEY = 'dsa.home.tradeHistoryCollapsed.v1';
+
+export function readStoredTradeHistoryCollapsed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(TRADE_HISTORY_COLLAPSED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function writeStoredTradeHistoryCollapsed(collapsed: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(TRADE_HISTORY_COLLAPSED_STORAGE_KEY, String(collapsed));
+  } catch {
+    // Browser storage is best-effort; the toggle remains usable in memory.
+  }
+}
+
+export interface ReconciledSaleEdit {
+  sale: ClosedSale;
+  profit: number;
+}
+
+export function reconcileSaleEdit(
+  sale: ClosedSale,
+  patch: { sellDate: string; sellPrice: number; quantity: number },
+): ReconciledSaleEdit | null {
+  const sellPrice = Number(patch.sellPrice);
+  const quantity = Number(patch.quantity);
+  if (
+    !patch.sellDate
+    || patch.sellDate < sale.purchaseDate
+    || !Number.isFinite(sellPrice)
+    || sellPrice <= 0
+    || !Number.isFinite(quantity)
+    || quantity <= 0
+  ) {
+    return null;
+  }
+  const profit = calculateClosedSaleProfit(sale.purchasePrice, sellPrice, quantity);
+  if (profit === null) return null;
+  return {
+    sale: { ...sale, sellDate: patch.sellDate, sellPrice, quantity, profit },
+    profit,
+  };
+}
+
+export interface ReconciledSaleDelete {
+  sales: ClosedSale[];
+  positions: CurrentPosition[];
+}
+
+export function reconcileSaleDelete(
+  sale: ClosedSale,
+  sales: ClosedSale[],
+  positions: CurrentPosition[],
+): ReconciledSaleDelete {
+  const remainingSales = sales.filter((item) => item.id !== sale.id);
+  const restored: CurrentPosition = {
+    id: sale.positionId ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    code: sale.code,
+    name: sale.name,
+    market: sale.market,
+    purchaseDate: sale.purchaseDate,
+    purchasePrice: sale.purchasePrice,
+    quantity: sale.quantity,
+    account: sale.account,
+  };
+  const existingIndex = sale.positionId
+    ? positions.findIndex((position) => position.id === sale.positionId)
+    : -1;
+  if (existingIndex >= 0) {
+    const existing = positions[existingIndex];
+    const merged = {
+      ...existing,
+      quantity: existing.quantity + sale.quantity,
+    };
+    return {
+      sales: remainingSales,
+      positions: positions.map((position, index) => (index === existingIndex ? merged : position)),
+    };
+  }
+  return { sales: remainingSales, positions: [...positions, restored] };
+}

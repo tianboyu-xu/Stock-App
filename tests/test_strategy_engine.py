@@ -216,5 +216,6 @@ def test_evaluate_signals_exposes_breakdowns_for_charts():
     assert set(signals) == {
         "buy_score", "sell_score", "buy_breakdown",
         "sell_breakdown", "buy_signal", "sell_signal",
+        "buy_allocation",
     }
     assert len(signals["buy_breakdown"]) == len(FIXTURE_BARS)

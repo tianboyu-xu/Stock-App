@@ -264,7 +264,7 @@ OPENAI_MODEL=deepseek-v4-flash
 4. **模型是否已下载到本地**
    ```bash
    ollama list          # 查看已有模型
-   ollama pull qwen3:8b # 如无则先拉取
+   ollama pull qwen3:8b # 如无则先拉取（轻量替代：ollama pull qwen3.5:9b）
    ```
 
 5. **远程部署 / Docker 时的网络与防火墙**

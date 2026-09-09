@@ -65,6 +65,7 @@ def compute_composite_signals(
     result = evaluate_signals(base, thresholds)
     return {
         "buy_score": result["buy_score"],
+        "buy_allocation": result["buy_allocation"],
         "sell_score": result["sell_score"],
         "buy_signal": result["buy_signal"],
         "sell_signal": result["sell_signal"],
@@ -83,6 +84,8 @@ def simulate_trades(
     stop_multiple_atr: Optional[float] = None,
     trail_multiple_atr: Optional[float] = None,
     max_entry_gap_atr: Optional[float] = None,
+    size_by_score: bool = False,
+    min_trade_gap_bars: int = 0,
 ) -> Dict[str, Any]:
     """在 [start_index, end_index] 区间内模拟交易（其余参数见模块 docstring）。
 
@@ -100,6 +103,9 @@ def simulate_trades(
     - 区间结束时仍持仓则按区间最后收盘价强制平仓。
     - 初始资金为 1，equity 每根 bar 一个收盘权益点，最后一点含平仓成本。
       holding_bars 累计有盘中持仓的 bar（开盘即平仓的 bar 不计入）。
+    - size_by_score 启用后按信号的 buy_allocation 分配权益；剩余现金不参与涨跌，
+      单仓不加仓、不借款。min_trade_gap_bars 限制普通买卖，保护性退出不受限。
+      decisions 中预算百分比均相对初始资金，卖出金额为扣费后现金流。
     """
     close: List[float] = base["close"]
     open_: List[float] = base["open"]
@@ -111,12 +117,19 @@ def simulate_trades(
     volume: List[float] = base["volume"]
     buy_signal: List[Optional[float]] = signals["buy_signal"]
     sell_signal: List[Optional[float]] = signals["sell_signal"]
+    allocations = signals.get("buy_allocation", [1.0] * len(close))
 
     cost = cost_pct_per_side / 100.0
     trades: List[Dict[str, Any]] = []
     skipped_entries: List[Dict[str, Any]] = []
     equity = [1.0] * (end_index - start_index + 1)
     realized = 1.0
+    cash = 1.0
+    units = 0.0
+    allocation = 1.0
+    last_trade_index: Optional[int] = None
+    decisions: List[Dict[str, Any]] = []
+    pending_decision: Optional[Dict[str, Any]] = None
     holding_bars = 0
     entry_i: Optional[int] = None
     entry_price = 0.0
@@ -127,7 +140,7 @@ def simulate_trades(
     last_entry_index: Optional[int] = None
 
     def close_trade(exit_i: int, exit_price: float, reason: str) -> None:
-        nonlocal entry_i, realized
+        nonlocal entry_i, realized, cash, units, last_trade_index
         assert entry_i is not None
         # 所有调用方传入未扣费成交价；平仓费用只在这里收取一次。
         net_exit = exit_price * (1.0 - cost)
@@ -138,10 +151,15 @@ def simulate_trades(
             "entry_price": round(entry_price, 4),
             "exit_price": round(net_exit, 4),
             "return_pct": round(trade_return, 4),
+            "allocation_pct": allocation * 100.0,
+            "profit": units * (net_exit - entry_price),
             "bars_held": exit_i - entry_i,
             "exit_reason": reason,
         })
-        realized *= 1.0 + trade_return / 100.0
+        cash += units * net_exit
+        realized = cash
+        units = 0.0
+        last_trade_index = exit_i
         entry_i = None
 
     pending_entry = False
@@ -161,6 +179,8 @@ def simulate_trades(
                     max_entry_gap_atr=max_entry_gap_atr,
                 )
                 if verdict["decision"] != DECISION_EXECUTE:
+                    if pending_decision is not None:
+                        pending_decision["reason"] = verdict["reason"]
                     skipped_entries.append({
                         "signal_date": dates[i - 1] if i > 0 else dates[i],
                         "date": dates[i],
@@ -173,6 +193,14 @@ def simulate_trades(
                 else:
                     entry_i = i
                     entry_price = open_[i] * (1.0 + cost)
+                    allocation = _clamp(allocations[i - 1], 0.0, 1.0) if size_by_score else 1.0
+                    spend = min(cash, realized * allocation)
+                    units = spend / entry_price
+                    cash -= spend
+                    last_trade_index = i
+                    if pending_decision is not None:
+                        pending_decision.update(status="executed", reason="signal", date=dates[i],
+                                                executed_budget_pct=spend * 100.0, cash_after_pct=cash * 100.0)
                     highest_close = 0.0
                     last_entry_index = i
                     if stop_multiple_atr is not None and entry_atr:
@@ -182,7 +210,11 @@ def simulate_trades(
                     trail_level = None
             pending_entry = False
         elif pending_exit and entry_i is not None:
+            proceeds = units * open_[i] * (1.0 - cost)
             close_trade(i, open_[i], "signal")
+            if pending_decision is not None:
+                pending_decision.update(status="executed", reason="signal", date=dates[i],
+                                        executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0)
             pending_exit = False
         else:
             pending_entry = False
@@ -201,7 +233,11 @@ def simulate_trades(
                 # 旧持仓跳空至退出价以下时开盘即平仓；其余退出 bar 有盘中敞口。
                 if i == entry_i or open_[i] > exit_level:
                     holding_bars += 1
+                proceeds = units * min(open_[i], exit_level) * (1.0 - cost)
                 close_trade(i, min(open_[i], exit_level), reason)
+                decisions.append(dict(signal_date=dates[i], date=dates[i], side="sell", status="executed",
+                                      reason=reason, suggested_budget_pct=proceeds * 100.0,
+                                      executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0))
                 stop_level = None
                 trail_level = None
             else:
@@ -212,12 +248,40 @@ def simulate_trades(
             highest_close = max(highest_close, close[i])
             if trail_multiple_atr is not None and entry_atr:
                 trail_level = highest_close - trail_multiple_atr * entry_atr
-            equity[offset] = realized * (close[i] / entry_price)
-            if sell_signal[i] is not None:
-                pending_exit = True
+            equity[offset] = cash + units * close[i]
         else:
             equity[offset] = realized
-            if buy_signal[i] is not None:
+        pending_decision = None
+        for side, trigger in (("sell", sell_signal[i]), ("buy", buy_signal[i])):
+            if trigger is not None:
+                fraction = _clamp(allocations[i], 0.0, 1.0) if size_by_score else 1.0
+                suggested = equity[offset] * fraction if side == "buy" else units * close[i]
+                decision = dict(signal_date=dates[i], date=dates[i], side=side, status="skipped",
+                                reason="signal", suggested_budget_pct=suggested * 100.0,
+                                executed_budget_pct=0.0, cash_after_pct=cash * 100.0)
+                decisions.append(decision)
+                if side == "buy" and cash <= 1e-12:
+                    decision["reason"] = "no_cash"
+                    continue
+                if side == "buy" and entry_i is not None:
+                    decision["reason"] = "position_open"
+                    continue
+                if side == "sell" and entry_i is None:
+                    decision["reason"] = "no_position"
+                    continue
+                if i == end_index:
+                    decision["reason"] = "no_next_bar"
+                    continue
+                if last_trade_index is not None and i + 1 - last_trade_index < min_trade_gap_bars:
+                    decision["reason"] = "trade_cooldown"
+                    continue
+                if side == "buy" and last_entry_index is not None and i + 1 - last_entry_index < window_days:
+                    decision["reason"] = "entry_cooldown"
+                    continue
+                if side == "sell":
+                    pending_exit = True
+                    pending_decision = decision
+                    continue
                 allowed = True
                 if use_trend_filter:
                     sma_today = sma200[i]
@@ -233,13 +297,21 @@ def simulate_trades(
                     allowed = vol_ref is not None and volume[i] > vol_ref
                 if allowed:
                     pending_entry = True
+                    pending_decision = decision
+                else:
+                    decision["reason"] = "entry_filter"
 
     if entry_i is not None:
+        proceeds = units * close[end_index] * (1.0 - cost)
         close_trade(end_index, close[end_index], "segment_end")
         equity[-1] = realized
+        decisions.append(dict(signal_date=dates[end_index], date=dates[end_index], side="sell",
+                              status="executed", reason="segment_end", suggested_budget_pct=proceeds * 100.0,
+                              executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0))
 
     return {
         "trades": trades,
+        "decisions": decisions,
         "skipped_entries": skipped_entries,
         "equity": equity,
         "holding_bars": holding_bars,
@@ -290,6 +362,7 @@ def simulate_buy_hold(
 def timing_signals_from_trades(
     base: Dict[str, Any],
     trade_pairs: Sequence[Tuple[str, str]],
+    allocations: Optional[Sequence[float]] = None,
 ) -> Dict[str, List[Any]]:
     """把已确认的 (entry_date, exit_date) 时点转换为“次日开盘成交”合成信号。
 
@@ -303,22 +376,25 @@ def timing_signals_from_trades(
     close: List[float] = base["close"]
     buy_signal: List[Optional[float]] = [None] * n
     sell_signal: List[Optional[float]] = [None] * n
+    buy_allocation = [1.0] * n
 
     def locate(wanted: str) -> Optional[int]:
         pos = bisect_left(dates, wanted)
         return pos if pos < n else None
 
-    for entry_date, exit_date in trade_pairs:
+    for trade_index, (entry_date, exit_date) in enumerate(trade_pairs):
         entry_i = locate(entry_date)
         exit_i = locate(exit_date)
         if entry_i is None or exit_i is None or exit_i < entry_i:
             continue
         buy_at = max(entry_i - 1, 0)
         buy_signal[buy_at] = close[buy_at]
+        if allocations is not None:
+            buy_allocation[buy_at] = allocations[trade_index]
         # exit_i == entry_i 时退而求其次：入场 bar 收盘给卖出信号，次日开盘离场
         sell_at = max(exit_i - 1, entry_i)
         sell_signal[sell_at] = close[sell_at]
-    return {"buy_signal": buy_signal, "sell_signal": sell_signal}
+    return {"buy_signal": buy_signal, "sell_signal": sell_signal, "buy_allocation": buy_allocation}
 
 
 def summarize_metrics(
@@ -369,8 +445,10 @@ def summarize_metrics(
         if down_std > 0:
             sortino = mean_r / down_std * math.sqrt(TRADING_DAYS_PER_YEAR)
 
-    gross_profit = sum(t["return_pct"] for t in trades if t["return_pct"] > 0)
-    gross_loss = sum(t["return_pct"] for t in trades if t["return_pct"] < 0)
+    # Sized trades contribute their cash P&L, not an unweighted sum of returns.
+    trade_profits = [t.get("profit", t["return_pct"]) for t in trades]
+    gross_profit = sum(profit for profit in trade_profits if profit > 0)
+    gross_loss = sum(profit for profit in trade_profits if profit < 0)
     wins = [t for t in trades if t["return_pct"] > 0]
     profit_factor: Optional[float]
     if gross_loss < 0:
@@ -397,7 +475,7 @@ def summarize_metrics(
     long_rate = _clamp(float(long_term_tax_pct), 0.0, 100.0) / 100.0
     after_tax_mult = 1.0
     for trade in trades:
-        trade_r = trade["return_pct"] / 100.0
+        trade_r = trade["return_pct"] / 100.0 * trade.get("allocation_pct", 100.0) / 100.0
         rate = (
             long_rate if trade["bars_held"] >= LONG_TERM_HOLDING_BARS else short_rate
         )

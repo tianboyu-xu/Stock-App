@@ -82,6 +82,40 @@ const TEXT: Record<string, string> = {
   'home.currentPositionsSaveEditAria': 'Save {code} position',
   'home.currentPositionsCancelEditAria': 'Cancel editing {code} position',
   'home.currentPositionsDeleteAria': 'Delete {code} position',
+  'home.currentPositionsSellAria': 'Sell {code} position',
+  'home.currentPositionsSellTitle': 'Sell position',
+  'home.currentPositionsSellDate': 'Sell date',
+  'home.currentPositionsSellPrice': 'Sell price',
+  'home.currentPositionsSellQuantity': 'Sell quantity',
+  'home.currentPositionsSellProfit': 'Estimated profit',
+  'home.currentPositionsSellConfirm': 'Confirm sale',
+  'home.currentPositionsSellDateInvalid': 'Sell date invalid',
+  'home.currentPositionsSellPriceRequired': 'Sell price required',
+  'home.currentPositionsSellQuantityInvalid': 'Sell quantity invalid',
+  'home.currentPositionsRealizedTotal': 'Total realized profit',
+  'home.currentPositionsProfitRealized': 'Realized P/L',
+  'home.tradeHistoryTitle': 'Trade history',
+  'home.tradeHistoryDescription': 'Trade history description',
+  'home.tradeHistoryTableAria': 'Trade history table',
+  'home.tradeHistoryCollapseAria': 'Collapse trade history',
+  'home.tradeHistoryExpandAria': 'Expand trade history',
+  'home.tradeHistoryEmptyTitle': 'No trade history',
+  'home.tradeHistoryEmptyDescription': 'Sold positions will appear here',
+  'home.tradeHistoryStock': 'Stock',
+  'home.tradeHistoryBuyDate': 'Buy date',
+  'home.tradeHistoryBuyPrice': 'Buy price',
+  'home.tradeHistorySellDate': 'Sell date',
+  'home.tradeHistorySellPrice': 'Sell price',
+  'home.tradeHistoryQuantity': 'Quantity',
+  'home.tradeHistoryProfit': 'P/L',
+  'home.tradeHistoryEditAria': 'Edit {code} trade record',
+  'home.tradeHistorySaveEditAria': 'Save {code} trade record',
+  'home.tradeHistoryCancelEditAria': 'Cancel editing {code} trade record',
+  'home.tradeHistoryDeleteAria': 'Delete {code} trade record',
+  'home.tradeHistoryRevertAria': 'Revert {code} sale back to position',
+  'home.tradeHistoryDateInvalid': 'Sell date invalid',
+  'home.tradeHistoryPriceRequired': 'Sell price required',
+  'home.tradeHistoryQuantityInvalid': 'Sell quantity invalid',
 };
 
 vi.mock('../../../contexts/UiLanguageContext', () => ({
@@ -416,5 +450,186 @@ describe('CurrentPositionTable', () => {
 
     expect(screen.queryByRole('columnheader', { name: 'Quantity' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Expand current positions' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('sells a full position from the row action and records realized profit', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 2, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    await screen.findAllByText('AAPL');
+    fireEvent.click(screen.getByRole('button', { name: 'Sell AAPL position' }));
+    fireEvent.change(screen.getByLabelText('Sell date'), { target: { value: '2026-09-04' } });
+    fireEvent.change(screen.getByLabelText('Sell price'), { target: { value: '120' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm sale' }));
+
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]')).toEqual([]);
+    });
+    const sales = JSON.parse(window.localStorage.getItem('dsa.home.closedSales.v1') ?? '[]');
+    expect(sales).toHaveLength(1);
+    expect(sales[0]).toMatchObject({
+      code: 'AAPL',
+      sellDate: '2026-09-04',
+      sellPrice: 120,
+      quantity: 2,
+      profit: 40,
+    });
+    expect(screen.getByTestId('closed-sales-summary')).toHaveTextContent('+40.00');
+  });
+
+  it('sells a partial quantity and keeps the remaining position', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 2, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    await screen.findAllByText('AAPL');
+    fireEvent.click(screen.getByRole('button', { name: 'Sell AAPL position' }));
+    fireEvent.change(screen.getByLabelText('Sell date'), { target: { value: '2026-09-04' } });
+    fireEvent.change(screen.getByLabelText('Sell price'), { target: { value: '120' } });
+    fireEvent.change(screen.getByLabelText('Sell quantity'), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm sale' }));
+
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]')[0].quantity).toBe(1);
+    });
+    const sales = JSON.parse(window.localStorage.getItem('dsa.home.closedSales.v1') ?? '[]');
+    expect(sales[0]).toMatchObject({ quantity: 1, profit: 20 });
+  });
+
+  it('rejects a sell quantity above the held quantity', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 2, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    await screen.findAllByText('AAPL');
+    fireEvent.click(screen.getByRole('button', { name: 'Sell AAPL position' }));
+    fireEvent.change(screen.getByLabelText('Sell date'), { target: { value: '2026-09-04' } });
+    fireEvent.change(screen.getByLabelText('Sell price'), { target: { value: '120' } });
+    fireEvent.change(screen.getByLabelText('Sell quantity'), { target: { value: '5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm sale' }));
+
+    expect(await screen.findByText('Sell quantity invalid')).toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]')).toHaveLength(1);
+  });
+
+  it('edits a trade history record and recalculates profit', async () => {
+    window.localStorage.setItem('dsa.home.closedSales.v1', JSON.stringify([{
+      id: 's-aapl', positionId: 'p-aapl', code: 'AAPL', name: 'AAPL',
+      purchaseDate: '2025-09-04', purchasePrice: 100, quantity: 2,
+      sellDate: '2026-09-04', sellPrice: 120, profit: 40, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByTestId('trade-history-table')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit AAPL trade record' }));
+    fireEvent.change(screen.getByLabelText('Sell price'), { target: { value: '130' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save AAPL trade record' }));
+
+    await waitFor(() => {
+      const sales = JSON.parse(window.localStorage.getItem('dsa.home.closedSales.v1') ?? '[]');
+      expect(sales[0]).toMatchObject({ sellPrice: 130, profit: 60 });
+    });
+    expect(screen.getByTestId('closed-sales-summary')).toHaveTextContent('+60.00');
+  });
+
+  it('deletes a trade history record without touching positions', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 1, account: 'HSA',
+    }]));
+    window.localStorage.setItem('dsa.home.closedSales.v1', JSON.stringify([{
+      id: 's-aapl', positionId: 'p-aapl', code: 'AAPL', name: 'AAPL',
+      purchaseDate: '2025-09-04', purchasePrice: 100, quantity: 2,
+      sellDate: '2026-09-04', sellPrice: 120, profit: 40, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByTestId('trade-history-table')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete AAPL trade record' }));
+
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem('dsa.home.closedSales.v1') ?? '[]')).toEqual([]);
+    });
+    expect(screen.queryByTestId('closed-sales-summary')).not.toBeInTheDocument();
+    expect(screen.getByText('No trade history')).toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]')).toHaveLength(1);
+  });
+
+  it('reverts a sale back into the original position lot', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 1, account: 'HSA',
+    }]));
+    window.localStorage.setItem('dsa.home.closedSales.v1', JSON.stringify([{
+      id: 's-aapl', positionId: 'p-aapl', code: 'AAPL', name: 'AAPL',
+      purchaseDate: '2025-09-04', purchasePrice: 100, quantity: 2,
+      sellDate: '2026-09-04', sellPrice: 120, profit: 40, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByTestId('trade-history-table')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Revert AAPL sale back to position' }));
+
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem('dsa.home.closedSales.v1') ?? '[]')).toEqual([]);
+    });
+    const positions = JSON.parse(window.localStorage.getItem(CURRENT_POSITIONS_STORAGE_KEY) ?? '[]');
+    expect(positions).toHaveLength(1);
+    expect(positions[0]).toMatchObject({ id: 'p-aapl', quantity: 3 });
+  });
+
+  it('collapses the trade history table and remembers the state', async () => {
+    window.localStorage.setItem('dsa.home.closedSales.v1', JSON.stringify([{
+      id: 's-aapl', positionId: 'p-aapl', code: 'AAPL', name: 'AAPL',
+      purchaseDate: '2025-09-04', purchasePrice: 100, quantity: 2,
+      sellDate: '2026-09-04', sellPrice: 120, profit: 40, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByTestId('trade-history-table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Sell price' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse trade history' }));
+    expect(screen.queryByRole('columnheader', { name: 'Sell price' })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.tradeHistoryCollapsed.v1')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand trade history' }));
+    expect(screen.getByRole('columnheader', { name: 'Sell price' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.tradeHistoryCollapsed.v1')).toBe('false');
   });
 });

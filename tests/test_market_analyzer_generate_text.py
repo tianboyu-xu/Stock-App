@@ -1073,6 +1073,57 @@ class TestAnalyzerGenerateText:
         assert "saved-secret-token" not in caplog.text
         assert "[REDACTED]" in str(exc_info.value)
 
+    def test_call_litellm_ollama_connection_failure_appends_actionable_hint(self):
+        from src.analyzer import _AllModelsFailedError
+
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="ollama/qwen3.5:9b",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.7,
+            generation_backend="litellm",
+            generation_fallback_backend="",
+            llm_channel_config_issues=[],
+            llm_blocks_legacy_fallback=False,
+        )
+
+        def fake_dispatch(model, call_kwargs, **kwargs):
+            raise ConnectionError("[WinError 10061] target machine actively refused it")
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=fake_dispatch):
+            with pytest.raises(_AllModelsFailedError) as exc_info:
+                analyzer._call_litellm("prompt", {"max_tokens": 4})
+
+        message = str(exc_info.value)
+        assert message.startswith("All LLM models failed (tried 1 model(s))")
+        assert "ollama serve" in message
+        assert "ollama pull qwen3.5:9b" in message
+
+    def test_call_litellm_non_ollama_failure_has_no_ollama_hint(self):
+        from src.analyzer import _AllModelsFailedError
+
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="openai/gpt-4o-mini",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.7,
+            generation_backend="litellm",
+            generation_fallback_backend="",
+            llm_channel_config_issues=[],
+            llm_blocks_legacy_fallback=False,
+        )
+
+        def fake_dispatch(model, call_kwargs, **kwargs):
+            raise ValueError("LLM returned empty response")
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=fake_dispatch):
+            with pytest.raises(_AllModelsFailedError) as exc_info:
+                analyzer._call_litellm("prompt", {"max_tokens": 4})
+
+        assert "ollama serve" not in str(exc_info.value)
+
     def test_analyze_redacts_hermes_secret_from_final_error_result(self, caplog):
         analyzer = self._make_analyzer()
         analyzer._config_override = SimpleNamespace(

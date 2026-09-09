@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from src.llm.generation_params import (
     GenerationParamRecovery,
@@ -75,6 +75,75 @@ def _parse_allowed_temperature(text: str) -> Optional[float]:
             if 0 <= value <= 2:
                 return value
     return None
+
+
+_CONNECTION_ERROR_MARKERS = (
+    "connection refused",
+    "actively refused",
+    "winerror 10061",
+    "failed to connect",
+    "connection aborted",
+    "connection reset",
+    "connection timed out",
+    "connect timeout",
+    "connecttimeout",
+    "name resolution",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "no route to host",
+    "timed out",
+    "timeout",
+    "max retries exceeded",
+    "apiconnectionerror",
+    "ollamaexception",
+    "could not connect",
+    "connection error",
+)
+
+_OLLAMA_MODEL_PREFIX = "ollama/"
+
+
+def is_llm_connection_error(error: BaseException) -> bool:
+    """Return True when the error text signals a transport/connection failure."""
+    text = _normalized_error_text(error)
+    if not text:
+        return False
+    return any(marker in text for marker in _CONNECTION_ERROR_MARKERS)
+
+
+def _iter_ollama_models(models: Iterable[str]) -> List[str]:
+    seen: List[str] = []
+    for model in models or []:
+        name = str(model or "").strip()
+        if name.lower().startswith(_OLLAMA_MODEL_PREFIX) and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def build_ollama_connection_hint(
+    models_tried: Iterable[str],
+    *,
+    last_error: Optional[BaseException] = None,
+) -> str:
+    """Build an actionable hint for Ollama connection failures.
+
+    Returns an empty string when no Ollama model was tried or the last
+    error does not look like a connection failure, so callers can safely
+    append the result without changing non-Ollama error text.
+    """
+    ollama_models = _iter_ollama_models(models_tried)
+    if not ollama_models:
+        return ""
+    if last_error is not None and not is_llm_connection_error(last_error):
+        return ""
+    model_names = ", ".join(ollama_models)
+    return (
+        " Ollama connection hint: the Ollama service looks unreachable for "
+        f"{model_names}. Start it with `ollama serve`, verify with "
+        "`curl http://localhost:11434` (expect `Ollama is running`), then run "
+        "`ollama list` and `ollama pull <model>` (e.g. `ollama pull qwen3.5:9b`) "
+        "if the model is missing. See docs/FAQ.md Q12c."
+    )
 
 
 def classify_litellm_generation_param_error(

@@ -10,55 +10,23 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { stocksApi, type KLineData } from '../../api/stocks';
+import { stocksApi } from '../../api/stocks';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { formatUiText } from '../../i18n/uiText';
 import { normalizeStockCode } from '../../utils/stockCode';
-import type { CurrentPosition } from '../../utils/currentPosition';
+import type { ClosedSale, CurrentPosition } from '../../utils/currentPosition';
+import {
+  buildProfitSeries,
+  type PositionHistoryResult,
+  type ProfitPoint,
+} from '../../utils/positionProfitSeries';
 import { Button } from '../common';
 import { DashboardStateBlock } from '../dashboard';
 
 const HISTORY_DAY_OPTIONS = [30, 60, 90, 180, 365];
 
-type ProfitPoint = {
-  date: string;
-  profit: number;
-};
-
-type HistoryResult = {
-  key: string;
-  data: KLineData[];
-  failed: boolean;
-};
-
 function positionKey(code: string): string {
   return normalizeStockCode(code).toUpperCase();
-}
-
-function buildProfitSeries(positions: CurrentPosition[], histories: HistoryResult[]): ProfitPoint[] {
-  const historyByKey = new Map(histories.map((item) => [item.key, item.data]));
-  const dateKeys = new Set<string>();
-  for (const history of histories) {
-    for (const bar of history.data) {
-      dateKeys.add(bar.date.slice(0, 10));
-    }
-  }
-
-  return Array.from(dateKeys)
-    .sort()
-    .map((date) => {
-      let profit = 0;
-      let activeLots = 0;
-      for (const position of positions) {
-        if (date < position.purchaseDate) continue;
-        const bar = historyByKey.get(positionKey(position.code))?.find((item) => item.date.slice(0, 10) === date);
-        if (!bar) continue;
-        activeLots += 1;
-        profit += (bar.close - position.purchasePrice) * position.quantity;
-      }
-      return activeLots > 0 ? { date, profit } : null;
-    })
-    .filter((item): item is ProfitPoint => item !== null);
 }
 
 function formatProfitDate(value: string, days: number): string {
@@ -78,9 +46,10 @@ function formatProfit(value: number, language: 'zh' | 'en'): string {
 
 interface CurrentPositionProfitChartProps {
   positions: CurrentPosition[];
+  closedSales?: ClosedSale[];
 }
 
-export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProps> = ({ positions }) => {
+export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProps> = ({ positions, closedSales = [] }) => {
   const { language, t } = useUiLanguage();
   const [days, setDays] = useState(30);
   const [data, setData] = useState<ProfitPoint[]>([]);
@@ -96,7 +65,7 @@ export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProp
     const codes = Array.from(new Map(
       positions.map((position) => [positionKey(position.code), position.code]),
     ).entries());
-    const results = await Promise.all(codes.map(async ([key, code]) => {
+    const results: PositionHistoryResult[] = await Promise.all(codes.map(async ([key, code]) => {
       try {
         const response = await stocksApi.getHistory(code, { period: 'daily', days });
         return { key, data: response.data ?? [], failed: false };
@@ -106,10 +75,12 @@ export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProp
     }));
 
     if (sequence !== requestSeqRef.current) return;
-    setData(buildProfitSeries(positions, results));
-    setHasError(results.length > 0 && results.every((result) => result.failed));
+    setData(buildProfitSeries(positions, results, closedSales));
+    setHasError(
+      closedSales.length === 0 && results.length > 0 && results.every((result) => result.failed),
+    );
     setIsLoading(false);
-  }, [days, positions]);
+  }, [closedSales, days, positions]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -120,6 +91,8 @@ export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProp
 
   const latestProfit = data[data.length - 1]?.profit ?? 0;
   const lineColor = latestProfit >= 0 ? 'hsl(var(--success))' : 'hsl(var(--danger))';
+  const realizedColor = 'hsl(var(--warning))';
+  const hasRealized = data.some((point) => point.realized !== null);
 
   return (
     <section className="border-t border-subtle px-3 py-3 sm:px-4" data-testid="current-position-profit-chart">
@@ -168,16 +141,34 @@ export const CurrentPositionProfitChart: React.FC<CurrentPositionProfitChartProp
                 minTickGap={days > 92 ? 48 : 24}
               />
               <YAxis
+                yAxisId="unrealized"
                 tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
                 tickFormatter={(value: number) => formatProfit(value, language)}
                 width={64}
               />
+              {hasRealized ? (
+                <YAxis
+                  yAxisId="realized"
+                  orientation="right"
+                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 10 }}
+                  tickFormatter={(value: number) => formatProfit(value, language)}
+                  width={64}
+                />
+              ) : null}
               <Tooltip
                 labelFormatter={(value) => value}
-                formatter={(value) => [formatProfit(Number(value), language), t('home.currentPositionsProfitAmount')]}
+                formatter={(value, name) => [
+                  formatProfit(Number(value), language),
+                  name === 'realized'
+                    ? t('home.currentPositionsProfitRealized')
+                    : t('home.currentPositionsProfitAmount'),
+                ]}
               />
-              <ReferenceLine y={0} stroke="hsl(var(--muted-foreground) / 0.5)" />
-              <Line type="monotone" dataKey="profit" stroke={lineColor} strokeWidth={2} dot={false} isAnimationActive={false} />
+              <ReferenceLine y={0} yAxisId="unrealized" stroke="hsl(var(--muted-foreground) / 0.5)" />
+              <Line yAxisId="unrealized" type="monotone" dataKey="profit" stroke={lineColor} strokeWidth={2} dot={false} isAnimationActive={false} />
+              {hasRealized ? (
+                <Line yAxisId="realized" type="monotone" dataKey="realized" stroke={realizedColor} strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls isAnimationActive={false} />
+              ) : null}
             </LineChart>
           </ResponsiveContainer>
         </div>

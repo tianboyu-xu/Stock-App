@@ -50,7 +50,7 @@ from src.llm.hermes import (
     sanitize_hermes_error_text,
 )
 from src.llm.generation_params import apply_litellm_generation_params
-from src.llm.errors import call_litellm_with_param_recovery
+from src.llm.errors import build_ollama_connection_hint, call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     LOCAL_CLI_GENERATION_BACKEND_IDS,
     LITELLM_BACKEND_ID,
@@ -3310,8 +3310,9 @@ class GeminiAnalyzer:
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
                 continue
 
+        ollama_hint = build_ollama_connection_hint(models_to_try, last_error=last_error)
         raise _AllModelsFailedError(
-            f"All LLM models failed (tried {len(models_to_try)} model(s)). Last error: {last_error}",
+            f"All LLM models failed (tried {len(models_to_try)} model(s)). Last error: {last_error}{ollama_hint}",
             last_response_text=last_response_text,
             last_model=last_model,
             last_usage=last_usage,

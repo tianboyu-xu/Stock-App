@@ -1,16 +1,20 @@
 import type React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, CircleAlert, GripVertical, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { Banknote, Check, ChevronDown, CircleAlert, GripVertical, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { stocksApi } from '../../api/stocks';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { getTodayInShanghai } from '../../utils/format';
 import {
   calculateCurrentPositionMetrics,
   POSITION_ACCOUNT_OPTIONS,
+  readStoredClosedSales,
   readStoredCurrentPositions,
   readStoredCurrentPositionsCollapsed,
+  reconcileSaleDelete,
+  writeStoredClosedSales,
   writeStoredCurrentPositions,
   writeStoredCurrentPositionsCollapsed,
+  type ClosedSale,
   type CurrentPosition,
   type PositionAccount,
 } from '../../utils/currentPosition';
@@ -26,6 +30,8 @@ import {
 import { readStoredIndicatorThresholds } from '../../utils/indicatorThresholds';
 import { areStockCodesEquivalent, normalizeStockCode } from '../../utils/stockCode';
 import { CurrentPositionProfitChart } from './CurrentPositionProfitChart';
+import { SellPositionDialog, type SellPositionConfirm } from './SellPositionDialog';
+import { TradeHistoryTable } from './TradeHistoryTable';
 import { getSummaryStockStyle } from './summaryStockStyle';
 
 type QuoteState = {
@@ -76,6 +82,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
   const { language, t } = useUiLanguage();
   const asOfDate = getTodayInShanghai();
   const [positions, setPositions] = useState<CurrentPosition[]>(readStoredCurrentPositions);
+  const [closedSales, setClosedSales] = useState<ClosedSale[]>(readStoredClosedSales);
   const [isCollapsed, setIsCollapsed] = useState<boolean>(readStoredCurrentPositionsCollapsed);
   const [quoteStates, setQuoteStates] = useState<Record<string, QuoteState>>({});
   const [quoteRefreshVersion, setQuoteRefreshVersion] = useState(0);
@@ -85,6 +92,7 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
   const [editingPositionId, setEditingPositionId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<PositionDraft | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [sellingPosition, setSellingPosition] = useState<CurrentPosition | null>(null);
   const [positionTriggers, setPositionTriggers] = useState<CompositeSummaryEntry[]>([]);
   const [dragPositionId, setDragPositionId] = useState<string | null>(null);
   const dragPositionIdRef = useRef<string | null>(null);
@@ -93,6 +101,10 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
   useEffect(() => {
     writeStoredCurrentPositions(positions);
   }, [positions]);
+
+  useEffect(() => {
+    writeStoredClosedSales(closedSales);
+  }, [closedSales]);
 
   const handleCollapsedToggle = () => {
     setIsCollapsed((previous) => {
@@ -282,6 +294,57 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
     if (editingPositionId === id) {
       cancelEditPosition();
     }
+    if (sellingPosition?.id === id) {
+      setSellingPosition(null);
+    }
+  };
+
+  const handleConfirmSell = (sale: SellPositionConfirm) => {
+    if (!sellingPosition) return;
+    const position = sellingPosition;
+    const record: ClosedSale = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      positionId: position.id,
+      code: position.code,
+      name: position.name,
+      market: position.market,
+      purchaseDate: position.purchaseDate,
+      purchasePrice: position.purchasePrice,
+      quantity: sale.quantity,
+      sellDate: sale.sellDate,
+      sellPrice: sale.sellPrice,
+      profit: sale.profit,
+      account: position.account,
+    };
+    setClosedSales((previous) => [...previous, record]);
+    const remaining = position.quantity - sale.quantity;
+    if (remaining <= 1e-9) {
+      setPositions((previous) => previous.filter((item) => item.id !== position.id));
+      if (editingPositionId === position.id) {
+        cancelEditPosition();
+      }
+    } else {
+      setPositions((previous) => previous.map((item) => (
+        item.id === position.id ? { ...item, quantity: remaining } : item
+      )));
+    }
+    setSellingPosition(null);
+  };
+
+  const handleSaveSale = (sale: ClosedSale) => {
+    setClosedSales((previous) => previous.map((item) => (item.id === sale.id ? sale : item)));
+  };
+
+  const handleDeleteSale = (id: string) => {
+    setClosedSales((previous) => previous.filter((item) => item.id !== id));
+  };
+
+  const handleRevertSale = (id: string) => {
+    const sale = closedSales.find((item) => item.id === id);
+    if (!sale) return;
+    const reconciled = reconcileSaleDelete(sale, closedSales, positions);
+    setClosedSales(reconciled.sales);
+    setPositions(reconciled.positions);
   };
 
   const updatePositionAccount = (id: string, account: PositionAccount) => {
@@ -306,6 +369,11 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
 
     return { metricsByPositionId, accountTotals };
   }, [asOfDate, positions, quoteStates]);
+
+  const totalRealized = useMemo(
+    () => closedSales.reduce((sum, sale) => sum + sale.profit, 0),
+    [closedSales],
+  );
 
   const handlePositionDragStart = (id: string) => {
     dragPositionIdRef.current = id;
@@ -803,6 +871,21 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
                               variant="ghost"
                               size="xsm"
                               className="h-7 w-7 px-0"
+                              onClick={() => {
+                                if (editingPositionId) {
+                                  cancelEditPosition();
+                                }
+                                setSellingPosition(position);
+                              }}
+                              aria-label={t('home.currentPositionsSellAria', { code: position.code })}
+                            >
+                              <Banknote className="h-3.5 w-3.5 text-success" aria-hidden="true" />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xsm"
+                              className="h-7 w-7 px-0"
                               onClick={() => handleRemovePosition(position.id)}
                               aria-label={t('home.currentPositionsDeleteAria', { code: position.code })}
                             >
@@ -822,7 +905,35 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
           </p>
         </div>
       )}
-      {positions.length > 0 ? <CurrentPositionProfitChart positions={positions} /> : null}
+      {positions.length > 0 || closedSales.length > 0 ? (
+        <CurrentPositionProfitChart positions={positions} closedSales={closedSales} />
+      ) : null}
+      {closedSales.length > 0 ? (
+        <div className="border-t border-subtle px-3 py-2 sm:px-4" data-testid="closed-sales-summary">
+          <p className="text-[11px] text-muted-text">
+            {t('home.currentPositionsRealizedTotal')}:{' '}
+            <span className={totalRealized >= 0 ? 'text-success' : 'text-danger'}>
+              {formatValue(totalRealized, language, true)}
+            </span>
+            {' '}({t('common.itemsCount', { count: closedSales.length })})
+          </p>
+        </div>
+      ) : null}
+      {positions.length > 0 || closedSales.length > 0 ? (
+        <TradeHistoryTable
+          sales={closedSales}
+          onSaveSale={handleSaveSale}
+          onDeleteSale={handleDeleteSale}
+          onRevertSale={handleRevertSale}
+        />
+      ) : null}
+      {sellingPosition ? (
+        <SellPositionDialog
+          position={sellingPosition}
+          onConfirm={handleConfirmSell}
+          onCancel={() => setSellingPosition(null)}
+        />
+      ) : null}
       </>
       )}
     </section>

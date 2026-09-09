@@ -40,6 +40,7 @@ from src.services.composite_factors import (
 )
 from src.services.indicator_service import (
     DEFAULT_THRESHOLDS,
+    MAX_BUY_SCORE,
     compute_indicators,
     _sma,
 )
@@ -362,8 +363,10 @@ def evaluate_signals(
         elif sell_enter:
             sell_signal[i] = close[i]
 
+    maximum_buy_score = MAX_BUY_SCORE + extra_scorer.max_extra()
     return {
         "buy_score": buy_score,
+        "buy_allocation": [max(0.25, min(1.0, score / maximum_buy_score)) for score in buy_score],
         "sell_score": sell_score,
         "buy_breakdown": buy_breakdown,
         "sell_breakdown": sell_breakdown,

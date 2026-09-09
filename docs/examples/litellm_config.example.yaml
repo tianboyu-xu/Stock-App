@@ -81,6 +81,7 @@ model_list:
   #   litellm_params:
   #     model: ollama/qwen3.8:27b
   #     api_base: http://localhost:11434
+  # 轻量替代：ollama/qwen3.5:9b
 
 # ===================================
 # Router 设置（可选）

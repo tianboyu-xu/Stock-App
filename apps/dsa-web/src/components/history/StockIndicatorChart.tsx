@@ -1,4 +1,5 @@
 import type React from 'react';
+import { AutoTuneBudgetLedger } from './AutoTuneBudgetLedger';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type AutoTuneTestConfidence, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
 import type { UiTextKey } from '../../i18n/uiText';
@@ -1870,6 +1871,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               short: String(autoTuneResult.assumptions.capitalGainsTaxShortTermPct ?? ''),
             })}
           </div>
+          <AutoTuneBudgetLedger decisions={selectedAutoTuneStrategy?.testDecisions} language={language} />
           {autoTuneEquityPlot ? (
             <div className="mt-3">
               <div className="mb-1 text-xs font-medium text-secondary-text">
@@ -2182,6 +2184,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                     <span>Max DD: {formatAutoTuneValue(autoTuneResult.fineTune.finalTest.metrics.maxDrawdownPct)}%</span>
                     <span>{t('priceHistory.autoTune.trades')}: {autoTuneResult.fineTune.finalTest.metrics.trades}</span>
                   </div>
+                  <AutoTuneBudgetLedger decisions={autoTuneResult.fineTune.finalTest.decisions} language={language} />
                   {autoTuneResult.fineTune.finalTest.confidence ? (
                     <TestConfidence confidence={autoTuneResult.fineTune.finalTest.confidence} />
                   ) : null}

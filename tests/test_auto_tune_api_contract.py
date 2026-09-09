@@ -58,7 +58,7 @@ def _report_payload(with_trades):
     }
     thresholds = {"composite_buy_threshold": 5, "composite_sell_threshold": 5}
     return {
-        "methodology_version": 2,
+        "methodology_version": 3,
         "window_days": 90,
         "history": {"bars": 814, "start_date": "2021-01-01", "end_date": bars[-1]["date"]},
         "split": {
@@ -79,6 +79,7 @@ def _report_payload(with_trades):
             "validation_score_dispersion": 0.1,
             "validation_folds": [{**fold, "metrics": metrics, "score": 0.4}],
             "test_equity": equity, "test_confidence": confidence,
+            "test_decisions": simulation["decisions"],
         }],
         "recommended": {
             "strategy_key": "A", "reason_code": "baseline_sufficient", "eps": 0.05,
@@ -110,12 +111,12 @@ def test_auto_tune_api_roundtrip_preserves_research_diagnostics(with_trades, res
     # FastAPI returns AutoTuneResponse(**report); by_alias matches response serialization.
     # The stock client then runs the existing deep toCamelCase converter on these keys.
     wire = json.loads(response_model.model_validate(payload).model_dump_json(by_alias=True))
-    assert wire["methodology_version"] == 2
+    assert wire["methodology_version"] == 3
     assert wire["walk_forward"] == payload["walk_forward"]
     strategy = wire["strategies"][0]
     for key in (
         "validation_score", "validation_score_median", "validation_score_dispersion",
-        "validation_folds", "test_confidence", "test_equity",
+        "validation_folds", "test_confidence", "test_equity", "test_decisions",
     ):
         assert strategy[key] == payload["strategies"][0][key]
     assert strategy["test_confidence"]["available"] is with_trades

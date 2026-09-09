@@ -96,6 +96,83 @@ def _manual_signals(n, buys=(), sells=(), price=10.0):
     return {"buy_signal": buy, "sell_signal": sell}
 
 
+def test_budget_cash_position_and_weighted_profit():
+    base = prepare_base_series(_make_bars([10, 10, 12, 12, 12, 12]))
+    signals = _manual_signals(6, buys=(0, 1), sells=(2, 4))
+    signals["buy_allocation"] = [0.5] * 6
+    sim = simulate_trades(base, signals, 0, 5, window_days=1,
+                          cost_pct_per_side=0, size_by_score=True)
+    assert sim["equity"] == pytest.approx([1, 1, 1.1, 1.1, 1.1, 1.1])
+    assert sim["trades"][0]["allocation_pct"] == 50
+    assert [(d["side"], d["reason"]) for d in sim["decisions"]] == [
+        ("buy", "signal"), ("buy", "position_open"), ("sell", "signal"), ("sell", "no_position")]
+    assert sim["decisions"][0]["cash_after_pct"] == 50
+    assert sim["decisions"][2]["executed_budget_pct"] == pytest.approx(60)
+    metrics = summarize_metrics(sim, 0, 5, short_term_tax_pct=35)
+    assert metrics["total_return_pct"] == 10
+    assert metrics["after_tax_total_return_pct"] == 6.5
+
+
+def test_exhausted_budget_blocks_buy_and_sale_replenishes_cash():
+    base = prepare_base_series(_flat_bars(9))
+    signals = _manual_signals(9, buys=(0, 2, 6), sells=(4,))
+    sim = simulate_trades(base, signals, 0, 8, window_days=1, cost_pct_per_side=0.1,
+                          size_by_score=True)
+    assert sim["decisions"][1]["reason"] == "no_cash"
+    assert sim["decisions"][1]["executed_budget_pct"] == 0
+    assert sim["decisions"][3]["status"] == "executed"
+    assert all(d["cash_after_pct"] >= 0 for d in sim["decisions"])
+    assert sim["equity"][-1] == pytest.approx(((1 - .001) / (1 + .001)) ** 2)
+
+
+def test_trade_cooldown_includes_exits_and_reentry_but_not_stops():
+    base = prepare_base_series(_flat_bars(15))
+    signals = _manual_signals(15, buys=(0, 7, 10), sells=(1, 5))
+    sim = simulate_trades(base, signals, 0, 14, window_days=1, cost_pct_per_side=0,
+                          min_trade_gap_bars=5)
+    assert [d["reason"] for d in sim["decisions"]][:5] == [
+        "signal", "trade_cooldown", "signal", "trade_cooldown", "signal"]
+    assert sim["trades"][0]["bars_held"] == 5
+    base["atr"] = [1.0] * 15
+    base["low"][2] = 8.0
+    protected = simulate_trades(base, signals, 0, 14, window_days=1, cost_pct_per_side=0,
+                                min_trade_gap_bars=5, stop_multiple_atr=1)
+    assert protected["trades"][0]["exit_reason"] == "stop"
+    assert protected["trades"][0]["bars_held"] == 1
+
+
+def test_multifactor_allocation_uses_theoretical_maximum_without_lookahead():
+    base = prepare_base_series(_make_bars(_synthetic_closes(300)))
+    signals = compute_composite_signals(base)
+    assert signals["buy_allocation"] == [max(.25, score / 10) for score in signals["buy_score"]]
+    extra = compute_composite_signals(base, {"boll_weight": 2, "cci_weight": 1})
+    assert extra["buy_allocation"] == [max(.25, score / 13) for score in extra["buy_score"]]
+    prefix = prepare_base_series(_make_bars(_synthetic_closes(250)))
+    prefix_signals = compute_composite_signals(prefix, {"boll_weight": 2, "cci_weight": 1})
+    assert extra["buy_allocation"][:250] == prefix_signals["buy_allocation"]
+
+
+def test_timing_benchmark_replays_allocation_as_well_as_dates():
+    base = prepare_base_series(_make_bars([10, 10, 12, 12, 12]))
+    signals = timing_signals_from_trades(
+        base, [(base["dates"][1], base["dates"][3])], allocations=[.5])
+    sim = simulate_trades(base, signals, 0, 4, window_days=1, cost_pct_per_side=0,
+                          size_by_score=True)
+    assert sim["equity"][-1] == pytest.approx(1.1)
+    assert sim["trades"][0]["allocation_pct"] == 50
+
+
+def test_budget_profit_factor_weights_actual_cash_gains_and_losses():
+    base = prepare_base_series(_make_bars([10, 10, 12, 12, 10, 9, 9]))
+    signals = _manual_signals(7, buys=(0, 3), sells=(2, 5))
+    signals["buy_allocation"] = [.5, .5, .5, 1, 1, 1, 1]
+    sim = simulate_trades(base, signals, 0, 6, window_days=1, cost_pct_per_side=0,
+                          size_by_score=True)
+    metrics = summarize_metrics(sim, 0, 6)
+    assert metrics["total_return_pct"] == -1
+    assert metrics["profit_factor"] == round(.1 / .11, 4)
+
+
 CUSTOM_THRESHOLDS = {
     "composite_buy_threshold": 5,
     "composite_sell_threshold": 5,

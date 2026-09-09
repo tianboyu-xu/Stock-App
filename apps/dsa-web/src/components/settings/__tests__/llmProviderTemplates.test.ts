@@ -98,7 +98,7 @@ describe('llmProviderTemplates', () => {
       gemini: 'gemini-3.1-pro-preview,gemini-3-flash-preview',
       anthropic: 'claude-sonnet-4-6,claude-opus-4-7',
       vertex_ai: 'gemini-3.1-pro-preview',
-      ollama: 'llama3.2,qwen2.5',
+      ollama: 'llama3.2,qwen3.8,qwen3.5:9b',
     });
   });
 });

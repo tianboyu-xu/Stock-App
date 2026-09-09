@@ -111,7 +111,7 @@ BOLL/CCI/DMI/MFI 同时产生图表触发标记 `boll_buy/sell`、`cci_buy/sell`
 - 多因子扩展回滚需同步还原共享公式、API 字段和 Web 阈值控件；无数据库迁移。
   回测方法更新的兼容性和回滚见下一节。
 
-## 9. 回测会计与验证方法 v2
+## 9. 回测会计与验证方法 v2（历史版本；当前预算规则见第 10 节）
 
 响应新增 `methodology_version=2`。旧结果的退出成本、敞口、基准收益和
 Fine Tune 选窗依据存在错误，必须重新运行；新旧结果不能作为同口径绩效比较。
@@ -210,3 +210,42 @@ npm test -- src/components/history/__tests__/StockIndicatorChart.test.tsx src/ap
 局部参数热图仍需后续独立设计，不能从单股票复合评分结果推导这些统计。
 回滚需同步还原后端、API schema、Web 类型/显示/版本判断并保留用户方案；
 无需数据库迁移，但回滚会恢复旧方法缺陷，已有 v2 结果应另存备查。
+
+## 10. 预算与低频执行 v3 / Budget and trade spacing
+
+`methodology_version=3`：A–F、Fine Tune 的训练、验证和最终测试均使用相同预算规则。
+每个独立回测区间从 100% 现金开始；区间内部不补充预算。旧结果与方案保留，需重新
+运行才能应用参数。交易触发仍使用现有复合评分，预算只改变执行与收益计算。
+
+- 买入比例为 `clamp(买入评分 / 理论满分, 25%, 100%)`，按信号收盘时的当前权益分配，
+  满分包含已启用扩展因子权重。该比例是固定启发式，不代表获利概率或经验证的最优仓位。
+- 单一多头持仓，不加仓、不借款、不做空；已有持仓的买入信号跳过。现金耗尽时买入
+  成交比例为 0%。买入费用包含在分配金额内，剩余现金不参与持仓涨跌。
+- 卖出全部持仓，扣除费用后的所得回到现金，可用于下一次买入。权益为现金加持仓市值，
+  收益相对初始资金计算；税后近似收益按实际分配比例加权后复利，不再把部分仓位当成满仓。
+  现有税后指标仍是独立展示估算，不在税前执行账户逐笔扣税。
+- 普通买卖成交至少间隔 5 根交易日 bar；两次买入还需满足所选 `window_days`。
+  冷却期信号直接跳过、不排队；止损、移动止盈、窗口结束平仓不受冷却期限制。
+- API 新增 `strategies[].test_decisions` 和 `fine_tune.final_test.decisions`。
+  Web 的各代策略和 Fine Tune 最终测试提供可展开的预算明细：信号/成交日期、方向、
+  建议预算比例、实际成交比例、剩余现金比例、成交/跳过原因。百分比全部相对初始预算，
+  盈利后可超过 100%；建议卖出为信号收盘市值，实际卖出为成交价扣费后的现金流。
+- 标普策略时点基准复用原交易的仓位比例；买入持有基准仍为满仓。时点基准沿用已有
+  日线映射近似（同日止损不能按另一市场的盘中价格精确重放）。
+- 没有新增环境变量或数据库迁移；Electron 使用相同 Web。回滚应同时恢复回测、寻优、
+  API/Web 字段与方法版本；保留用户旧方案，重新生成结果。
+
+English: Each independent simulation starts with 100% cash. A–F and Fine Tune buy
+25–100% of current equity using the signal score divided by its theoretical maximum
+(including enabled extra factors). This fixed sizing heuristic is not a calibrated
+probability or a demonstrated optimal allocation. The simulation holds one long
+position at a time, without pyramiding, borrowing, or shorting. An unfunded buy is
+skipped; sells liquidate the position and replenish cash. Fees are included in the
+cash flows, and idle cash does not earn the stock return. Ordinary fills are spaced
+at least five trading bars apart, in addition to the selected entry interval.
+Cooldown signals are skipped, not queued; protective and terminal exits are exempt.
+The bilingual test ledger shows suggested and executed percentages of initial
+budget, remaining cash, and skip reasons. After-tax comparison compounds returns
+weighted by allocation; it remains an estimate separate from the pre-tax cash ledger.
+Saved v2 results must be rerun. No environment configuration or database migration is
+required. Revert the backend, API, Web, and methodology version together to roll back.

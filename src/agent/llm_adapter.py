@@ -34,7 +34,7 @@ from src.agent.provider_trace import (
     resolved_provider_namespace,
     trace_model_matches,
 )
-from src.llm.errors import call_litellm_with_param_recovery
+from src.llm.errors import build_ollama_connection_hint, call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     AUTO_AGENT_BACKEND_ID,
     GENERATION_ONLY_BACKEND_IDS,
@@ -664,7 +664,8 @@ class LLMToolAdapter:
                 continue
 
         suffix = " (rate-limit encountered during fallback)" if hit_rate_limit else ""
-        error_msg = f"All LLM models failed{suffix}. Last error: {last_error}"
+        ollama_hint = build_ollama_connection_hint(models_to_try, last_error=last_error)
+        error_msg = f"All LLM models failed{suffix}. Last error: {last_error}{ollama_hint}"
         logger.error(error_msg)
         return LLMResponse(content=error_msg, provider="error")
 

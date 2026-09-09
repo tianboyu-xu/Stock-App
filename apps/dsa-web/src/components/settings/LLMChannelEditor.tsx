@@ -738,7 +738,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
                 label={discoveredModels.length > 0 ? '手动模型（逗号分隔）' : '模型（逗号分隔）'}
                 fieldKey="LLM_CHANNEL_MODELS"
                 helpKey="settings.llm_channel.models"
-                examples={['LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro', 'LLM_OLLAMA_MODELS=qwen3:8b,llama3.1:8b']}
+                examples={['LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro', 'LLM_OLLAMA_MODELS=qwen3:8b,llama3.1:8b,qwen3.5:9b']}
               />
             <Input
               id={modelsInputId}

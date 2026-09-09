@@ -153,7 +153,7 @@ export interface StockIndicatorsResponse {
 export type AutoTuneSegmentKey = 'train' | 'validation' | 'test' | 'trainValidation';
 
 // Increment with backend selection/accounting changes; persisted results are not migrated.
-export const AUTO_TUNE_METHODOLOGY_VERSION = 2;
+export const AUTO_TUNE_METHODOLOGY_VERSION = 3;
 
 export interface AutoTuneSegmentMetrics {
   totalReturnPct: number;
@@ -210,7 +210,19 @@ export interface AutoTuneValidationFold {
   score: number;
 }
 
+export interface AutoTuneDecision {
+  signalDate: string;
+  date: string;
+  side: 'buy' | 'sell';
+  status: 'executed' | 'skipped';
+  reason: string;
+  suggestedBudgetPct: number;
+  executedBudgetPct: number;
+  cashAfterPct: number;
+}
+
 export interface AutoTuneStrategyResult {
+  testDecisions?: AutoTuneDecision[];
   key: string;
   nameZh: string;
   nameEn: string;
@@ -319,6 +331,7 @@ export interface FineTuneResult {
     metrics: AutoTuneSegmentMetrics;
     equity: AutoTuneEquitySeries;
     confidence?: AutoTuneTestConfidence;
+    decisions?: AutoTuneDecision[];
   };
 }
 

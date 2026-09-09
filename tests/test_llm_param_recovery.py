@@ -2,8 +2,10 @@
 """Tests for LiteLLM generation-parameter recovery."""
 
 from src.llm.errors import (
+    build_ollama_connection_hint,
     call_litellm_with_param_recovery,
     classify_litellm_generation_param_error,
+    is_llm_connection_error,
 )
 from src.llm.generation_params import (
     apply_litellm_generation_params,
@@ -200,3 +202,20 @@ def test_streaming_retry_does_not_cache_before_stream_is_consumed() -> None:
 
     assert "temperature" not in calls[1]
     assert future_kwargs["temperature"] == 0.7
+
+
+def test_ollama_connection_hint_only_for_connection_failures() -> None:
+    refused = ConnectionError("[WinError 10061] target machine actively refused it")
+    assert is_llm_connection_error(refused) is True
+    assert is_llm_connection_error(ValueError("LLM returned empty response")) is False
+
+    hint = build_ollama_connection_hint(["ollama/qwen3.5:9b"], last_error=refused)
+    assert "ollama serve" in hint
+    assert "ollama pull qwen3.5:9b" in hint
+    assert "Q12c" in hint
+
+    assert build_ollama_connection_hint(
+        ["ollama/qwen3.5:9b"], last_error=ValueError("bad json")
+    ) == ""
+    assert build_ollama_connection_hint(["openai/gpt-4o"], last_error=refused) == ""
+    assert build_ollama_connection_hint([]) == ""

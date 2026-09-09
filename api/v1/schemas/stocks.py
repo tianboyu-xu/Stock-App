@@ -232,6 +232,7 @@ class AutoTuneStrategyResult(BaseModel):
     """单策略代际寻优结果"""
 
     key: str = Field(..., description="策略标识 (A/B/C/D/E/F)")
+    test_decisions: List[Dict[str, Any]] = Field(default_factory=list, description="测试期触发、预算分配与执行结果")
     name_zh: str = Field("", description="策略名称（中文）")
     name_en: str = Field("", description="策略名称（英文）")
     description_zh: str = Field("", description="策略说明（中文）")

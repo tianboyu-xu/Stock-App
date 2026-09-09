@@ -262,7 +262,7 @@ Work through the following 5 checkpoints in order:
 4. **Has the model been pulled locally?**
    ```bash
    ollama list           # list downloaded models
-   ollama pull qwen3:8b  # pull if missing
+   ollama pull qwen3:8b  # pull if missing (lightweight alternative: ollama pull qwen3.5:9b)
    ```
 
 5. **Network / firewall for remote or Docker deployments**

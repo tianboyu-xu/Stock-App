@@ -266,7 +266,8 @@ HILL_CLIMB_SWEEPS = 2      # 爬山搜索的最大扫描轮数
 EPS_SIMPLICITY = 0.05      # “足够好”容差：验证分差距小于该值即视为相当
 MAX_VALIDATION_FOLDS = 3
 MIN_VALIDATION_FOLD_BARS = 252  # 不为了折数人为拆出无法形成足够交易的短窗口
-METHODOLOGY_VERSION = 2
+METHODOLOGY_VERSION = 3
+MIN_TRADE_GAP_BARS = 5
 
 # 基准对比：标普500 指数代码（走 YFinance 美股指数路由）与最少可用 bar 数。
 BENCHMARK_INDEX_CODE = "^GSPC"
@@ -365,6 +366,8 @@ class _GenerationEvaluator:
             start,
             end,
             window_days=self._window_days,
+            size_by_score=True,
+            min_trade_gap_bars=MIN_TRADE_GAP_BARS,
             cost_pct_per_side=self._cost,
             use_trend_filter=gen["trend_filter"],
             use_volume_filter=gen["volume_filter"],
@@ -929,17 +932,21 @@ def _build_benchmarks(
         return simulate_trades(
             base, evaluator.signals(recommended_thresholds), *bounds,
             window_days=window_days, cost_pct_per_side=cost_pct_per_side,
+            size_by_score=True, min_trade_gap_bars=MIN_TRADE_GAP_BARS,
             use_trend_filter=recommended_gen["trend_filter"],
             use_volume_filter=recommended_gen["volume_filter"],
             stop_multiple_atr=rec_stop, trail_multiple_atr=rec_trail,
         )
 
-    def replay(pairs_subset: List[Tuple[str, str]], bounds: Tuple[int, int]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        signals = timing_signals_from_trades(sp_base, pairs_subset)
+    def replay(source_trades: List[Dict[str, Any]], bounds: Tuple[int, int]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        signals = timing_signals_from_trades(
+            sp_base, [(t["entry_date"], t["exit_date"]) for t in source_trades],
+            allocations=[t.get("allocation_pct", 100.0) / 100.0 for t in source_trades],
+        )
         # window_days=1：重放不重复施加间隔限制（原交易已满足）
         replayed = simulate_trades(
             sp_base, signals, bounds[0], bounds[1],
-            window_days=1, cost_pct_per_side=cost_pct_per_side,
+            window_days=1, cost_pct_per_side=cost_pct_per_side, size_by_score=True,
         )
         metrics = summarize_metrics(
             replayed, bounds[0], bounds[1],
@@ -952,16 +959,14 @@ def _build_benchmarks(
     test_equity = None
     if sp_tv is not None:
         sim = stock_simulation((tv_start, tv_end))
-        pairs = [(t["entry_date"], t["exit_date"]) for t in sim["trades"]]
-        segments["train_validation"], _ = replay(pairs, sp_tv)
+        segments["train_validation"], _ = replay(sim["trades"], sp_tv)
     if sp_test is not None:
         # 复用已冻结策略的测试交易，避免为基准再次回测股票测试段。
         test_sim_stock = recommended_test_simulation
         if test_sim_stock is None:
             test_sim_stock = stock_simulation((test_start, test_end))
-        test_pairs = [(t["entry_date"], t["exit_date"]) for t in test_sim_stock["trades"]]
         # 没有交易表示全段持有现金，仍应报告正确测试日期上的零收益。
-        segments["test"], test_sim_sp = replay(test_pairs, sp_test)
+        segments["test"], test_sim_sp = replay(test_sim_stock["trades"], sp_test)
         test_equity = _equity_series(sp_base, test_sim_sp, sp_test[0], sp_test[1])
     benchmarks.append(_benchmark_entry(
         "strategy_on_sp500",
@@ -1152,6 +1157,7 @@ def run_auto_tune(
                 for fold in selected["folds"]
             ],
             "test_equity": test_equity,
+            "test_decisions": test_simulation["decisions"],
             "test_confidence": summarize_test_confidence(test_simulation, seed=seed),
         })
 
@@ -1214,6 +1220,7 @@ def run_auto_tune(
                 long_term_tax_pct=long_term_capital_gains_tax_pct,
             ),
             "equity": _equity_series(base, final_simulation, *ranges["test"]),
+            "decisions": final_simulation["decisions"],
             "confidence": summarize_test_confidence(final_simulation, seed=seed),
         }
 
@@ -1246,6 +1253,9 @@ def run_auto_tune(
             "execution": "next_open",
             "cost_pct_per_side": cost_pct_per_side,
             "entry_gap_bars": window_days,
+            "min_trade_gap_bars": MIN_TRADE_GAP_BARS,
+            "initial_budget_pct": 100,
+            "position_sizing": "buy_score_fraction_single_position",
             "atr_period": 14,
             "trend_filter_ma": 200,
             "capital_gains_tax_short_term_pct": short_term_capital_gains_tax_pct,
