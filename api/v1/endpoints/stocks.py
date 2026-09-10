@@ -12,6 +12,7 @@
 """
 
 import logging
+import json
 from typing import Optional
 import re
 
@@ -828,6 +829,8 @@ def auto_tune_stock(
     train_start_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="训练段起始日期（可选裁剪）"),
     train_end_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="训练段结束日期（可选裁剪）"),
     fine_tune_window_days: Optional[int] = Query(None, ge=60, le=3000, description="Fine Tune 滑动训练窗口天数（可选）"),
+    allocation_config: Optional[str] = Query(None, max_length=4096, description="资金配置设置 JSON，见 Auto Tune 文档"),
+    aces_config: Optional[str] = Query(None, max_length=8192, description="Strategy G ACES versioned configuration JSON; omitted means disabled"),
 ) -> AutoTuneResponse:
     """
     Auto Tune 参数寻优
@@ -854,6 +857,22 @@ def auto_tune_stock(
         AutoTuneResponse: 六代策略对比（A–F）、基准对比与推荐参数
     """
     try:
+        from src.services.allocation.research import AllocationConfig
+        from src.services.allocation.economic_reward import BenchmarkDataMissing
+        config_values = json.loads(allocation_config) if allocation_config else {}
+        if not isinstance(config_values, dict):
+            raise ValueError("allocation_config must be a JSON object")
+        AllocationConfig.from_dict(config_values)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail={"error": "invalid_allocation_config", "message": str(error)})
+    try:
+        from src.services.aces.config import ACESConfig
+        aces_values = json.loads(aces_config) if aces_config else None
+        if aces_values is not None:
+            ACESConfig.from_dict(aces_values)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail={"error": "invalid_aces_config", "message": str(error)})
+    try:
         service = StockService()
         # get_daily_data(days=N) 的 N 约为交易日数的一半（内部换算日历区间），
         # 因此取 years*365/2 + 30 以覆盖完整历史。
@@ -865,6 +884,22 @@ def auto_tune_stock(
         )
 
         bars = result.get("data", [])
+        from src.services.allocation.economic_reward import BenchmarkSeries
+        from data_provider.us_index_mapping import is_us_stock_code
+        from src.config import get_config
+        economic_values = config_values.setdefault("economic", {})
+        economic_values.setdefault("allowed_max_drawdown", min(1., get_config().portfolio_risk_drawdown_alert_pct / 100))
+        if aces_values is not None:
+            aces_values.setdefault("allocation", {}).setdefault("economic", {}).setdefault(
+                "allowed_max_drawdown", min(1., get_config().portfolio_risk_drawdown_alert_pct / 100))
+        allocation_benchmark = None
+        # Total-return economics require verified adjusted prices and matching US
+        # session closes on both sides. Never substitute the ^GSPC price index.
+        if is_us_stock_code(stock_code) and result.get("price_basis") == "ADJUSTED_TOTAL_RETURN":
+            adjusted = service.get_history_data(stock_code="SPY", period="daily", days=fetch_days)
+            if adjusted.get("price_basis") == "ADJUSTED_TOTAL_RETURN":
+                allocation_benchmark = BenchmarkSeries(
+                    {bar["date"]: bar["close"] for bar in adjusted.get("data", [])}, adjusted=True)
         from src.services.indicator_optimizer import (
             BENCHMARK_INDEX_CODE,
             run_auto_tune,
@@ -892,9 +927,16 @@ def auto_tune_stock(
             train_start_date=train_start_date,
             train_end_date=train_end_date,
             fine_tune_window_days=fine_tune_window_days,
+            allocation_config=config_values,
+            allocation_benchmark=allocation_benchmark,
+            aces_config=aces_values,
+            aces_metadata={"ticker": stock_code, "provider": result.get("source"),
+                           "adjustment_mode": result.get("price_basis")},
         )
         return AutoTuneResponse(**report)
 
+    except BenchmarkDataMissing as e:
+        raise HTTPException(status_code=422, detail={"error": "BENCHMARK_DATA_MISSING", "message": str(e)})
     except ValueError as e:
         raise HTTPException(
             status_code=422,

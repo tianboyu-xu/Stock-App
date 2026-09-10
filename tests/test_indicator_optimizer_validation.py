@@ -37,6 +37,28 @@ def _small_search(monkeypatch):
     monkeypatch.setattr(optimizer, "TOP_K", 4)
 
 
+def test_aces_is_opt_in_and_preserves_all_legacy_generations():
+    from src.services.allocation.economic_reward import BenchmarkSeries
+    bars = _bars(1300)
+    benchmark = BenchmarkSeries({b["date"]: 100 + i * .01 for i, b in enumerate(bars)}, adjusted=True)
+    kwargs = dict(window_days=20, test_years=1, seed=19,
+                  allocation_config={"policy_mode": "CURRENT", "threshold_iterations": 1},
+                  allocation_benchmark=benchmark)
+    legacy = optimizer.run_auto_tune(bars, **kwargs)
+    expanded = optimizer.run_auto_tune(bars, **kwargs, aces_config={
+        "policy_mode": "FIXED", "buy_thresholds": [5, 6], "sell_thresholds": [-5, -6], "purge_bars": 20,
+        "allocation": {"validation_folds": 2}, "risk": {"minimum_trades": 1}},
+        aces_metadata={"ticker": "SYNTH", "adjustment_mode": "ADJUSTED_TOTAL_RETURN"})
+    assert legacy["aces"] is None
+    assert expanded["strategies"] == legacy["strategies"]
+    assert expanded["recommended"] == legacy["recommended"]
+    assert expanded["allocation"] == legacy["allocation"]
+    assert expanded["aces"]["strategy_key"] == "G"
+    assert expanded["aces"]["version"] == 1
+    assert not expanded["aces"]["live_enabled"]
+    assert expanded["aces"]["policies"][0]["economic_curve"][0]["buy_hold_nav"] == 1
+
+
 def test_holdout_perturbation_cannot_change_any_selected_window_strategy_or_parameter():
     bars = _bars(1300)
     bounds = optimizer._split_ranges(len(bars), test_bars=252)
@@ -47,12 +69,16 @@ def test_holdout_perturbation_cannot_change_any_selected_window_strategy_or_para
             changed[index][key] *= factor
         changed[index]["volume"] *= 5
 
-    kwargs = dict(window_days=20, test_years=1, fine_tune_window_days=450, seed=19)
+    kwargs = dict(window_days=20, test_years=1, fine_tune_window_days=450, seed=19,
+                  allocation_config={"q": {"episodes": 3}, "threshold_iterations": 1})
     original = optimizer.run_auto_tune(bars, **kwargs)
     perturbed = optimizer.run_auto_tune(changed, **kwargs)
     assert original["recommended"] == perturbed["recommended"]
     assert len(original["walk_forward"]["folds"]) == 3
     assert original["walk_forward"] == perturbed["walk_forward"]
+    for key in ("selected_policy", "validation_scores", "q_table", "tuned_fixed_targets", "config", "joint_thresholds"):
+        assert original["allocation"][key] == perturbed["allocation"][key]
+        assert original["fine_tune"]["final_test"]["allocation"][key] == perturbed["fine_tune"]["final_test"]["allocation"][key]
     for before, after in zip(original["strategies"], perturbed["strategies"]):
         assert before["params"] == after["params"]
         assert before["validation_folds"] == after["validation_folds"]
@@ -125,7 +151,7 @@ def test_all_selection_finishes_before_test_and_only_one_fine_tune_winner_is_sim
             bar[key] *= 2
     report = optimizer.run_auto_tune(
         bars, window_days=20, test_years=1, fine_tune_window_days=280,
-        benchmark_bars=benchmark,
+        benchmark_bars=benchmark, allocation_config={"q": {"episodes": 3}, "threshold_iterations": 1},
     )
     assert report["recommended"]["strategy_key"] == chosen_generations[0]
     assert len(test_calls) == len(optimizer.GENERATIONS) + 1
@@ -143,7 +169,8 @@ def test_walk_forward_is_chronological_aggregates_dispersion_and_uses_latest_par
 
     monkeypatch.setattr(optimizer, "_search_generation", search)
     bars = _bars(1300)
-    report = optimizer.run_auto_tune(bars, window_days=20, test_years=1)
+    report = optimizer.run_auto_tune(bars, window_days=20, test_years=1,
+                                     allocation_config={"q": {"episodes": 3}, "threshold_iterations": 1})
     folds = report["walk_forward"]["folds"]
     assert len(folds) == 3
     assert folds[-1]["train"] == report["split"]["train"]

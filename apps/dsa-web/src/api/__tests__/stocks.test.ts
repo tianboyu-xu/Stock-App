@@ -46,3 +46,17 @@ it('converts the Auto Tune methodology, validation and final-test contract at th
     finalTest: { strategyKey: 'A', positionIndex: 2, confidence: { sharpeCiUpper: 1.8 } },
   });
 });
+
+it('sends allocation settings and preserves nested exposure transitions and Q support', async () => {
+  get.mockResolvedValueOnce({ data: { allocation: { selected_policy: 'TUNED_FIXED',
+    policies: [{ transitions: [{ requested_target_exposure: .8, execution: { actual_target_exposure: .6 },
+      state_before: { trigger_bucket: 'STRONG_BUY' }, nav_at_next_trigger: 1.08 }] }],
+    q_table: [{ visit_count: 3, update_count: 500 }] } } });
+  const result = await stocksApi.autoTune('AAPL', { allocationConfig: { policy_mode: 'AUTO', q: { episodes: 50 } } });
+  expect(get).toHaveBeenLastCalledWith('/api/v1/stocks/AAPL/auto-tune', {
+    params: { allocation_config: JSON.stringify({ policy_mode: 'AUTO', q: { episodes: 50 } }) }, timeout: 300000,
+  });
+  expect(result.allocation?.selectedPolicy).toBe('TUNED_FIXED');
+  expect(result.allocation?.policies[0].transitions[0].execution?.actualTargetExposure).toBe(.6);
+  expect(result.allocation?.qTable[0]).toEqual({ visitCount: 3, updateCount: 500 });
+});

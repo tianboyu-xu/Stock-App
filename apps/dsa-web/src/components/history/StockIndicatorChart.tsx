@@ -1,5 +1,7 @@
 import type React from 'react';
 import { AutoTuneBudgetLedger } from './AutoTuneBudgetLedger';
+import { AutoTuneAllocationPanel } from './AutoTuneAllocationPanel';
+import { ACESResults, ACESSetup } from './ACESPanel';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type AutoTuneTestConfidence, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
 import type { UiTextKey } from '../../i18n/uiText';
@@ -773,6 +775,8 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   } | null>(null);
   const [progressTick, setProgressTick] = useState(0);
   const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResponse | null>(null);
+  const [acesConfig, setACESConfig] = useState<Record<string, unknown> | undefined>();
+  const [acesValid, setACESValid] = useState(true);
   const [selectedStrategyKey, setSelectedStrategyKey] = useState<string | null>(null);
   const [equityHoverIndex, setEquityHoverIndex] = useState<number | null>(null);
   const [autoTuneError, setAutoTuneError] = useState<string | null>(null);
@@ -936,6 +940,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     setTuneProgress({ startMs: startedAt, estimateMs, fineTuneWindows });
     try {
       const response = await stocksApi.autoTune(stockCode, {
+        acesConfig,
         windowDays: transactionWindow,
         years: autoTuneYears,
         testYears: autoTuneTestYears,
@@ -970,7 +975,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       setIsTuning(false);
       setTuneProgress(null);
     }
-  }, [autoTuneTestYears, autoTuneYears, stockCode, transactionWindow, trainRangeDates, trainRangePct, fineTuneEnabled, fineTuneDays]);
+  }, [autoTuneTestYears, autoTuneYears, stockCode, transactionWindow, trainRangeDates, trainRangePct, fineTuneEnabled, fineTuneDays, acesConfig]);
 
   // Tick while tuning so the progress bar/elapsed time re-renders.
   useEffect(() => {
@@ -1036,6 +1041,15 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     writeStoredThresholds(stockCode, next);
     void load(days, next);
   }, [days, load, stockCode]);
+
+  const applyJointThresholds = useCallback((buy: number, sell: number) => {
+    if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult)) return;
+    const next = normalizeThresholds({ ...DEFAULT_THRESHOLDS,
+      compositeBuyThreshold: buy, compositeSellThreshold: -sell });
+    setThresholds(next);
+    writeStoredThresholds(stockCode, next);
+    void load(days, next);
+  }, [autoTuneResult, days, load, stockCode]);
 
   // --- Preset management ---------------------------------------------------
   const savePreset = useCallback(() => {
@@ -1669,11 +1683,12 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 ))}
               </select>
             ) : null}
-            <Button variant="primary" size="sm" className="sm:ml-auto" onClick={() => void runAutoTune()} disabled={isTuning}>
+            <Button variant="primary" size="sm" className="sm:ml-auto" onClick={() => void runAutoTune()} disabled={isTuning || !acesValid}>
               {isTuning ? t('priceHistory.autoTune.running') : t('priceHistory.autoTune.button')}
             </Button>
           </div>
         </div>
+        <ACESSetup language={language} disabled={isTuning} onChange={(config, valid) => { setACESConfig(config); setACESValid(valid); }} />
         {isTuning && tuneProgressInfo ? (
           <div className="mt-2">
             <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-xs text-secondary-text">
@@ -1872,6 +1887,8 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
             })}
           </div>
           <AutoTuneBudgetLedger decisions={selectedAutoTuneStrategy?.testDecisions} language={language} />
+          <AutoTuneAllocationPanel report={autoTuneResult.allocation} language={language} onApplyThresholds={isCurrentAutoTune ? applyJointThresholds : undefined} />
+          <ACESResults report={autoTuneResult.aces} language={language} />
           {autoTuneEquityPlot ? (
             <div className="mt-3">
               <div className="mb-1 text-xs font-medium text-secondary-text">
@@ -2185,6 +2202,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                     <span>{t('priceHistory.autoTune.trades')}: {autoTuneResult.fineTune.finalTest.metrics.trades}</span>
                   </div>
                   <AutoTuneBudgetLedger decisions={autoTuneResult.fineTune.finalTest.decisions} language={language} />
+                  <AutoTuneAllocationPanel report={autoTuneResult.fineTune.finalTest.allocation} language={language} onApplyThresholds={isCurrentAutoTune ? applyJointThresholds : undefined} />
                   {autoTuneResult.fineTune.finalTest.confidence ? (
                     <TestConfidence confidence={autoTuneResult.fineTune.finalTest.confidence} />
                   ) : null}

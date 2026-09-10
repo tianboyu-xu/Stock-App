@@ -150,6 +150,8 @@ class StockService:
                 "stock_code": stock_code,
                 "stock_name": stock_name,
                 "period": period,
+                "price_basis": "ADJUSTED_TOTAL_RETURN" if source == "YfinanceFetcher" else "UNVERIFIED",
+                "source": source,
                 "data": data,
             }
             

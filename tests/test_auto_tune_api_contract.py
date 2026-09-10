@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from src.services.backtest_statistics import summarize_test_confidence
+from src.services.allocation.research import AllocationConfig, AllocationStudy
 from src.services.strategy_backtester import (
     prepare_base_series,
     simulate_trades,
@@ -57,8 +58,15 @@ def _report_payload(with_trades):
         "validation": {"start_date": "2023-01-01", "end_date": "2023-12-31", "bars": 252},
     }
     thresholds = {"composite_buy_threshold": 5, "composite_sell_threshold": 5}
+    allocation = AllocationStudy(
+        prepare_base_series(bars), {"buy_signal": buys, "sell_signal": sells,
+                                   "buy_score": [7] * len(bars), "sell_score": [7] * len(bars)},
+        (0, 29), (30, 59), dict(cost_pct_per_side=.1, window_days=1, min_trade_gap_bars=1),
+        AllocationConfig.from_dict({"q": {"episodes": 5}}),
+    ).report((60, 89))
     return {
-        "methodology_version": 3,
+        "methodology_version": 6,
+        "allocation": allocation,
         "window_days": 90,
         "history": {"bars": 814, "start_date": "2021-01-01", "end_date": bars[-1]["date"]},
         "split": {
@@ -111,7 +119,8 @@ def test_auto_tune_api_roundtrip_preserves_research_diagnostics(with_trades, res
     # FastAPI returns AutoTuneResponse(**report); by_alias matches response serialization.
     # The stock client then runs the existing deep toCamelCase converter on these keys.
     wire = json.loads(response_model.model_validate(payload).model_dump_json(by_alias=True))
-    assert wire["methodology_version"] == 3
+    assert wire["methodology_version"] == 6
+    assert wire["allocation"] == json.loads(json.dumps(payload["allocation"]))
     assert wire["walk_forward"] == payload["walk_forward"]
     strategy = wire["strategies"][0]
     for key in (
@@ -130,7 +139,7 @@ def test_auto_tune_api_roundtrip_preserves_research_diagnostics(with_trades, res
 
 def test_legacy_auto_tune_payload_does_not_gain_current_methodology(response_model):
     payload = _report_payload(False)
-    for key in ("methodology_version", "walk_forward", "fine_tune"):
+    for key in ("methodology_version", "walk_forward", "fine_tune", "allocation"):
         payload.pop(key)
     for key in (
         "validation_score", "validation_score_median", "validation_score_dispersion",
@@ -142,3 +151,18 @@ def test_legacy_auto_tune_payload_does_not_gain_current_methodology(response_mod
     assert wire["methodology_version"] is None
     assert wire["strategies"][0]["test_confidence"] is None
     assert wire["fine_tune"] is None
+
+
+def test_v2_joint_thresholds_and_daily_observations_survive_schema(response_model):
+    from tests.test_allocation_threshold_research import fit
+    payload = _report_payload(True)
+    payload["allocation"] = fit(mode="AUTO").report((96, 119))
+    wire = json.loads(response_model(**payload).model_dump_json())
+    assert wire["allocation"]["joint_thresholds"] == payload["allocation"]["joint_thresholds"]
+    row = next(p for p in wire["allocation"]["policies"] if p["name"] == "THRESHOLD_CURRENT")
+    assert len(row["score_observations"]) == 24
+    assert "cash_bucket" in row["transitions"][0]["state_before"]
+    assert "reward_after_regret" in row["transitions"][0]
+    assert "cagr_penalty" in row["transitions"][0]
+    assert row["transitions"][0]["benchmark_return"] is None
+    assert "economic_curve" in row

@@ -34,6 +34,7 @@ from src.services.strategy_engine import (
     prepare_base_series,  # noqa: F401 兼容性重新导出：optimizer/测试仍从本模块导入
 )
 from src.services.execution_policy import DECISION_EXECUTE, evaluate_entry
+from src.services.allocation import PortfolioEnvironment
 
 TRADING_DAYS_PER_YEAR = 252
 # 单边交易成本（佣金+滑点近似），用于策略比较，非投资建议。
@@ -120,6 +121,7 @@ def simulate_trades(
     allocations = signals.get("buy_allocation", [1.0] * len(close))
 
     cost = cost_pct_per_side / 100.0
+    environment = PortfolioEnvironment(cost)
     trades: List[Dict[str, Any]] = []
     skipped_entries: List[Dict[str, Any]] = []
     equity = [1.0] * (end_index - start_index + 1)
@@ -143,7 +145,8 @@ def simulate_trades(
         nonlocal entry_i, realized, cash, units, last_trade_index
         assert entry_i is not None
         # 所有调用方传入未扣费成交价；平仓费用只在这里收取一次。
-        net_exit = exit_price * (1.0 - cost)
+        closed = environment.rebalance(0, exit_price)
+        net_exit = (-closed.trade_value - closed.transaction_cost) / closed.before.shares
         trade_return = (net_exit / entry_price - 1.0) * 100.0
         trades.append({
             "entry_date": dates[entry_i],
@@ -152,11 +155,11 @@ def simulate_trades(
             "exit_price": round(net_exit, 4),
             "return_pct": round(trade_return, 4),
             "allocation_pct": allocation * 100.0,
-            "profit": units * (net_exit - entry_price),
+            "profit": closed.realized_profit,
             "bars_held": exit_i - entry_i,
             "exit_reason": reason,
         })
-        cash += units * net_exit
+        cash = environment.cash
         realized = cash
         units = 0.0
         last_trade_index = exit_i
@@ -192,11 +195,12 @@ def simulate_trades(
                     entry_atr = None
                 else:
                     entry_i = i
-                    entry_price = open_[i] * (1.0 + cost)
                     allocation = _clamp(allocations[i - 1], 0.0, 1.0) if size_by_score else 1.0
-                    spend = min(cash, realized * allocation)
-                    units = spend / entry_price
-                    cash -= spend
+                    entered = environment.rebalance(environment.target_for_budget_fraction(allocation), open_[i])
+                    entry_price = environment.average_cost
+                    spend = entered.before.cash - entered.after.cash
+                    units = environment.shares
+                    cash = environment.cash
                     last_trade_index = i
                     if pending_decision is not None:
                         pending_decision.update(status="executed", reason="signal", date=dates[i],
@@ -248,7 +252,7 @@ def simulate_trades(
             highest_close = max(highest_close, close[i])
             if trail_multiple_atr is not None and entry_atr:
                 trail_level = highest_close - trail_multiple_atr * entry_atr
-            equity[offset] = cash + units * close[i]
+            equity[offset] = environment.mark_to_market(close[i]).nav
         else:
             equity[offset] = realized
         pending_decision = None
@@ -334,15 +338,14 @@ def simulate_buy_hold(
     open_: List[float] = base["open"]
     dates: List[str] = base["dates"]
     cost = cost_pct_per_side / 100.0
-    entry_price = open_[start_index] * (1.0 + cost)
-    net_exit = close[end_index] * (1.0 - cost)
-    trade_return = (net_exit / entry_price - 1.0) * 100.0 if entry_price > 0 else 0.0
-    equity = (
-        [close[i] / entry_price for i in range(start_index, end_index + 1)]
-        if entry_price > 0 else [1.0] * (end_index - start_index + 1)
-    )
-    if equity:
-        equity[-1] = 1.0 + trade_return / 100.0
+    environment = PortfolioEnvironment(cost)
+    environment.rebalance(1.0, open_[start_index])
+    entry_price = environment.average_cost
+    equity = [environment.mark_to_market(close[i]).nav for i in range(start_index, end_index + 1)]
+    exited = environment.rebalance(0.0, close[end_index])
+    net_exit = (-exited.trade_value - exited.transaction_cost) / exited.before.shares
+    trade_return = (net_exit / entry_price - 1.0) * 100.0
+    equity[-1] = environment.snapshot.nav
     return {
         "trades": [{
             "entry_date": dates[start_index],
@@ -356,6 +359,10 @@ def simulate_buy_hold(
         "equity": equity,
         "holding_bars": len(equity),
         "initial_equity": 1.0,
+        "transaction_cost": environment.total_transaction_cost,
+        "turnover": environment.turnover,
+        "trade_count": environment.trade_count,
+        "average_exposure": 1.0,
     }
 
 

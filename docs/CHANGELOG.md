@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] 新增独立 Strategy G — ACES 研究策略：七维资金状态、波动率风险限额、现金收益、隔离期滚动验证和执行压力测试；保留 A–F，提供可选基础设置与研究就绪检查，默认不接入实盘。
+- [改进] Auto Tune v6 加入默认 30% 日历 CAGR 目标、复权 SPY 相对奖励和增量缺口惩罚；展示三条 NAV 曲线，硬回撤违规禁止应用，缺失基准明确标记。
 
+- [改进] Auto Tune v5 联合优化买卖阈值与资金配置：独立多折训练、可行反事实机会遗憾、现金状态桶与逐日近阈值诊断；真实收益与机会估计分开显示，单股满仓上涨不因无现金受罚。
+- [新功能] Auto Tune v4 增加目标仓位资金配置：统一现金/持仓环境、固定与调优映射、离散 Q-learning、训练日期支持数与低样本回退、冻结验证/测试及简单策略优先；Web 展示配置比较、预算时间线与 Q 表，中英说明见 `docs/auto-tune-allocation.md`。
 - [改进] Auto Tune / Fine Tune A–F 使用显式现金与按评分分配的单仓预算，普通买卖至少间隔 5 个交易日；测试明细显示每次触发的建议/成交预算与跳过原因，税后收益按仓位加权，方法版本升级为 v3（中英说明见 `docs/auto-tune-strategy.md`）。
 - [修复] Ollama 连接失败时错误信息追加可操作指引（`ollama serve` / `curl` 连通性检查 / `ollama list` / `ollama pull`，见 `docs/FAQ.md` Q12c），覆盖普通分析与 Agent 两条 `All LLM models failed` 路径；原错误前缀保持不变。
 - [新功能] Ollama 新增轻量模型 `qwen3.5:9b`（约 6.6GB，见 https://ollama.com/library/qwen3.5:9b）：同步 `.env.example`、配置注册表示例、中英文配置指南/FAQ、模型渠道表、Web 渠道模板与示例。

@@ -266,7 +266,7 @@ HILL_CLIMB_SWEEPS = 2      # 爬山搜索的最大扫描轮数
 EPS_SIMPLICITY = 0.05      # “足够好”容差：验证分差距小于该值即视为相当
 MAX_VALIDATION_FOLDS = 3
 MIN_VALIDATION_FOLD_BARS = 252  # 不为了折数人为拆出无法形成足够交易的短窗口
-METHODOLOGY_VERSION = 3
+METHODOLOGY_VERSION = 6
 MIN_TRADE_GAP_BARS = 5
 
 # 基准对比：标普500 指数代码（走 YFinance 美股指数路由）与最少可用 bar 数。
@@ -994,6 +994,10 @@ def run_auto_tune(
     train_start_date: Optional[str] = None,
     train_end_date: Optional[str] = None,
     fine_tune_window_days: Optional[int] = None,
+    allocation_config: Optional[Dict[str, Any]] = None,
+    allocation_benchmark=None,
+    aces_config=None,
+    aces_metadata=None,
 ) -> Dict[str, Any]:
     """对单只股票执行 Auto Tune 并返回完整报告。
 
@@ -1088,6 +1092,62 @@ def run_auto_tune(
     if fine_tune_window_days and fine_tune_window_days > 0:
         fine_tune_result = _fine_tune_search(
             evaluator, ranges, dates, fine_tune_window_days, window_days, seed,
+        )
+
+    from src.services.allocation.research import AllocationConfig
+    from src.services.allocation.threshold_research import ThresholdStudy
+
+    allocation_settings = AllocationConfig.from_dict(allocation_config)
+
+    def fit_allocation(train_bounds):
+        # Keep score/factor parameters fixed ex ante for the V2 nested search.
+        # Reusing a validation-selected A–F/Fine Tune feature model here would
+        # let earlier allocation folds inherit later validation information.
+        return ThresholdStudy(
+            base, evaluator.signals(DEFAULT_THRESHOLDS), train_bounds, ranges["validation"],
+            dict(cost_pct_per_side=cost_pct_per_side, window_days=window_days,
+                 min_trade_gap_bars=MIN_TRADE_GAP_BARS), allocation_settings,
+            buy_threshold=DEFAULT_THRESHOLDS["composite_buy_threshold"],
+            sell_threshold=-DEFAULT_THRESHOLDS["composite_sell_threshold"],
+            benchmark=allocation_benchmark,
+        )
+
+    allocation_study = fit_allocation(ranges["train"])
+    aces_study, aces_report, aces_test = None, None, ranges["test"]
+    if aces_config is not None:
+        from datetime import datetime, timezone, timedelta
+        from src.services.aces.config import ACESConfig
+        from src.services.aces.optimizer import ACESStudy
+        from src.services.aces.runtime import validate_bars
+        aces_settings = ACESConfig.from_dict(aces_config)
+        if aces_settings.enabled:
+            try:
+                # Keep A–F unchanged; a trailing preview never enters G's features,
+                # state, execution or final-test financial results.
+                confirmed = list(bars)
+                cutoff = datetime.now(timezone.utc).date() - timedelta(days=1)
+                excluded = []
+                while confirmed and (confirmed[-1]["date"] > cutoff.isoformat() or confirmed[-1].get("finalized") is False):
+                    excluded.append(confirmed.pop()["date"])
+                validate_bars(confirmed, last_confirmed_date=cutoff)
+                aces_base = prepare_base_series(confirmed)
+                aces_scores = compute_composite_signals(aces_base, DEFAULT_THRESHOLDS)
+                aces_test = (ranges["test"][0], len(confirmed) - 1)
+                aces_validation = (ranges["validation"][0], ranges["validation"][1] - aces_settings.purge_bars)
+                aces_study = ACESStudy(aces_base, aces_scores, ranges["train"],
+                                       aces_validation, aces_settings, allocation_benchmark,
+                                       metadata={**(aces_metadata or {}), "feature_config": dict(DEFAULT_THRESHOLDS),
+                                                 "excluded_preview_dates": excluded})
+            except ValueError as error:
+                aces_report = {"strategy_key": "G", "name": "ACES", "version": aces_settings.version,
+                               "readiness": {"status": "FAIL", "checks": {}}, "error": str(error),
+                               "live_enabled": False, "config": aces_settings.to_dict()}
+    fine_allocation_study = None
+    if fine_tune_result is not None:
+        allocation_winner = next(item for item in fine_tune_result["sweep"]
+                                 if item["position_index"] == fine_tune_result["best_position_index"])
+        fine_allocation_study = fit_allocation(
+            (dates.index(allocation_winner["train_start"]), dates.index(allocation_winner["train_end"])),
         )
 
     strategies: List[Dict[str, Any]] = []
@@ -1222,10 +1282,21 @@ def run_auto_tune(
             "equity": _equity_series(base, final_simulation, *ranges["test"]),
             "decisions": final_simulation["decisions"],
             "confidence": summarize_test_confidence(final_simulation, seed=seed),
+            "allocation": fine_allocation_study.report(ranges["test"]),
         }
+
+    if aces_study:
+        try:
+            aces_report = aces_study.report(aces_test)
+        except ValueError as error:
+            aces_report = {"strategy_key": "G", "name": "ACES", "version": aces_study.config.version,
+                           "readiness": {"status": "FAIL", "checks": {}}, "error": str(error),
+                           "live_enabled": False, "config": aces_study.config.to_dict()}
 
     return {
         "methodology_version": METHODOLOGY_VERSION,
+        "aces": aces_report,
+        "allocation": {"technical_strategy_key": "A", **allocation_study.report(ranges["test"])},
         "window_days": window_days,
         "walk_forward": {
             "folds": [

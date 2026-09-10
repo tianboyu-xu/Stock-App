@@ -113,6 +113,7 @@ export interface IndicatorThresholds {
 
 export interface CompositeSignals {
   buyScore: number[];
+  buyAllocation?: number[];
   sellScore: number[];
   buySignal: IndicatorSeries;
   sellSignal: IndicatorSeries;
@@ -153,7 +154,7 @@ export interface StockIndicatorsResponse {
 export type AutoTuneSegmentKey = 'train' | 'validation' | 'test' | 'trainValidation';
 
 // Increment with backend selection/accounting changes; persisted results are not migrated.
-export const AUTO_TUNE_METHODOLOGY_VERSION = 3;
+export const AUTO_TUNE_METHODOLOGY_VERSION = 6;
 
 export interface AutoTuneSegmentMetrics {
   totalReturnPct: number;
@@ -332,10 +333,171 @@ export interface FineTuneResult {
     equity: AutoTuneEquitySeries;
     confidence?: AutoTuneTestConfidence;
     decisions?: AutoTuneDecision[];
+    allocation?: AllocationReport;
   };
 }
 
+export interface AllocationState {
+  volatilityRegime?: string;
+  drawdownBucket?: string;
+  cashBucket?: string;
+  triggerBucket: string;
+  exposureBucket: number;
+  pnlBucket: string;
+  regime: string;
+}
+
+export interface AllocationPortfolio {
+  cash: number;
+  shares: number;
+  nav: number;
+  stockValue: number;
+  currentExposure: number;
+  averageCost: number;
+  unrealizedPnlPct: number;
+  lastPrice: number;
+}
+
+export interface AllocationTransition {
+  tradeNavFraction?: number;
+  cashSpentFraction?: number | null;
+  allowedTargetExposure?: number | null;
+  riskReason?: string;
+  signalStatus?: string;
+  qConfidence?: string;
+  cagrPenalty?: number;
+  cagrDeficitIncrease?: number;
+  benchmarkReward?: number;
+  benchmarkRewardReason?: string;
+  relativeAlpha?: number | null;
+  opportunityRegret?: number;
+  opportunityReason?: string;
+  portfolioReward?: number;
+  rewardAfterRegret?: number;
+  triggerDate: string;
+  triggerDirection: string;
+  triggerScore: number;
+  stateBefore: AllocationState;
+  portfolioBefore: AllocationPortfolio;
+  requestedTargetExposure: number | null;
+  policyReason: string;
+  executionDate: string | null;
+  execution: {
+    actualTargetExposure: number;
+    side: string;
+    tradeValue: number;
+    transactionCost: number;
+    after: AllocationPortfolio;
+  } | null;
+  executionReason: string;
+  nextTriggerDate: string;
+  navAtNextTrigger: number;
+  durationDays: number;
+  marketMove: number;
+  reward: number;
+  qValue: number | null;
+  visitCount: number;
+}
+
+export interface AllocationMetrics extends Omit<AutoTuneSegmentMetrics, 'afterTaxTotalReturnPct' | 'afterTaxCagrPct'> {
+  returnCaptureVsHold?: number | null;
+  drawdownReductionPp?: number;
+  sharpeImprovement?: number;
+  finalBudget?: number;
+  actualCagr?: number | null;
+  targetCagr?: number;
+  requiredNav?: number;
+  cagrTargetGap?: number;
+  cagrPenalty?: number;
+  benchmarkReward?: number;
+  benchmarkStatus?: string;
+  benchmarkReturn?: number | null;
+  benchmarkCagr?: number | null;
+  excessReturn?: number | null;
+  excessCagr?: number | null;
+  benchmarkBeatPeriods?: number;
+  totalEvaluationPeriods?: number;
+  benchmarkBeatRate?: number | null;
+  maximumExposure?: number;
+  riskRejected?: boolean;
+  allowedMaxDrawdown?: number;
+  opportunityRegret?: number;
+  missedUpsideRegret?: number;
+  missedDownsideRegret?: number;
+  thresholdUpsideRegret?: number;
+  thresholdDownsideRegret?: number;
+  thresholdMissedBuyCount?: number;
+  thresholdMissedSellCount?: number;
+  missedUpsideCount?: number;
+  missedDownsideCount?: number;
+  opportunityCaptureRatio?: number | null;
+  initialNav: number;
+  finalNav: number;
+  tradeCount: number;
+  turnover: number;
+  averageExposurePct: number;
+  transactionCost: number;
+  allocationDecisions: number;
+  budgetConstrainedDecisions: number;
+  lowSampleFallbacks: number;
+  fallbackPct: number;
+}
+
+export interface AllocationReport {
+  jointThresholds?: {
+    original: { buy: number; sell: number };
+    selected: { buy: number; sell: number };
+    candidatesEvaluated: number;
+    thresholdStability: { buyStd: number; sellStd: number };
+    selectedValidation: { medianValidationReturn: number; worstValidationReturn: number;
+      medianValidationRegret: number; positiveFolds: number } | null;
+    folds: unknown[];
+    candidates: unknown[];
+  };
+  technicalStrategyKey?: string;
+  selectedPolicy: string | null;
+  selectionStatus?: string;
+  testRiskStatus?: string;
+  benchmarkStatus?: string;
+  selectionBasis: string;
+  policies: {
+    name: string;
+    thresholds?: { buy: number; sell: number };
+    metrics: Record<'train' | 'validation' | 'test', AllocationMetrics>;
+    transitions: AllocationTransition[];
+    economicCurve?: { date: string; strategyNav: number; requiredNav: number; benchmarkNav: number | null; cagrDeficit: number; buyHoldNav?: number; cashNav?: number }[];
+    scoreObservations?: { date: string; buyScore: number; sellScore: number; buyThreshold: number;
+      sellThreshold: number; missedBuyRegret: number; missedSellRegret: number; opportunityReason: string;
+      assetForwardReturn?: number }[];
+    testEquity: AutoTuneEquitySeries;
+    executions: { date: string; reason: string; side: string; tradeValue: number; transactionCost: number; nav: number }[];
+  }[];
+  uniqueStatesVisited: number;
+  config: { policyMode: string; simplicityTolerance: number; q: Record<string, number>; state: Record<string, unknown> };
+  qTable: { state: AllocationState; targetExposure: number | null; qValue: number; visitCount: number;
+    updateCount: number; validAtBucket: boolean; recommendedAtBucket: boolean; recommendationReason: string }[];
+}
+
+export interface ACESReport extends Omit<AllocationReport, 'config'> {
+  strategyKey: 'G'; version: number; error?: string;
+  config: Record<string, unknown>;
+  readiness: { status: 'PASS' | 'WARN' | 'FAIL'; checks: Record<string, boolean> };
+  selectedThresholds?: { buy: number; sell: number };
+  inspectedOnly?: boolean;
+  candidates?: unknown[];
+  robustness?: { candidate: { policy: string; thresholds: number[] }; scenarios: {
+    scenario: string; passed: boolean; folds: { metrics: AllocationMetrics; failures: string[] }[];
+  }[] }[];
+  folds?: unknown[];
+  provenance?: Record<string, unknown>; searchComplexity?: Record<string, number>;
+  buyHoldMetrics?: Record<string, AllocationMetrics>;
+  parameterStabilityScore?: number | null;
+  liveEnabled: boolean; liveStatus?: string;
+}
+
 export interface AutoTuneResponse {
+  aces?: ACESReport | null;
+  allocation?: AllocationReport | null;
   methodologyVersion?: number | null;
   walkForward?: {
     folds: { train: AutoTuneDateRange; validation: AutoTuneDateRange }[];
@@ -507,6 +669,8 @@ export const stocksApi = {
       trainStartDate?: string;
       trainEndDate?: string;
       fineTuneWindowDays?: number;
+      allocationConfig?: Record<string, unknown>;
+      acesConfig?: Record<string, unknown>;
     } = {},
   ): Promise<AutoTuneResponse> {
     const queryParams: Record<string, string | number> = {};
@@ -516,10 +680,12 @@ export const stocksApi = {
     if (params.trainStartDate) queryParams.train_start_date = params.trainStartDate;
     if (params.trainEndDate) queryParams.train_end_date = params.trainEndDate;
     if (params.fineTuneWindowDays != null) queryParams.fine_tune_window_days = params.fineTuneWindowDays;
+    if (params.allocationConfig) queryParams.allocation_config = JSON.stringify(params.allocationConfig);
+    if (params.acesConfig) queryParams.aces_config = JSON.stringify(params.acesConfig);
     const response = await apiClient.get<Record<string, unknown>>(
       `/api/v1/stocks/${encodeURIComponent(code)}/auto-tune`,
       // 个股与标普500 基准两次串行取数，数据源降级时各需 ~130s，放宽超时上限
-      { params: queryParams, timeout: 300000 },
+      { params: queryParams, timeout: params.acesConfig ? 900000 : 300000 },
     );
     return toCamelCase<AutoTuneResponse>(response.data);
   },

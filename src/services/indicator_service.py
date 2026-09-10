@@ -568,6 +568,7 @@ def compute_indicators(
         "triggers": triggers,
         "composite": {
             "buy_score": buy_score,
+            "buy_allocation": [max(0.25, min(1.0, score / (MAX_BUY_SCORE + extra_max))) for score in buy_score],
             "sell_score": sell_score,
             "buy_signal": buy_signal,
             "sell_signal": sell_signal,

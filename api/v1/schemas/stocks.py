@@ -148,6 +148,7 @@ class CompositeBreakdown(BaseModel):
 class CompositeSignals(BaseModel):
     """复合 BUY/SELL 评分与信号"""
 
+    buy_allocation: List[float] = Field(default_factory=list, description="Current-policy fraction of cash budget per BUY score")
     buy_score: List[int] = Field(default_factory=list, description="BUY 评分序列（满分 = 经典 10 分 + 启用扩展因子权重和）")
     sell_score: List[int] = Field(default_factory=list, description="SELL 评分序列（满分 = 经典 10 分 + 启用扩展因子权重和）")
     buy_signal: List[Optional[float]] = Field(default_factory=list, description="BUY 信号（收盘价或 null，仅在评分进入阈值区间时触发）")
@@ -354,6 +355,8 @@ class AutoTuneResponse(BaseModel):
         ),
     )
     recommended: AutoTuneRecommended = Field(..., description="最终推荐参数")
+    allocation: Optional[Dict[str, Any]] = Field(None, description="冻结技术策略后的资金配置比较、转移与 Q 表")
+    aces: Optional[Dict[str, Any]] = Field(None, description="Independent Strategy G ACES study; A–F remain unchanged")
     fine_tune: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
