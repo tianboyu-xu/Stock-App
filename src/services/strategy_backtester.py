@@ -119,6 +119,7 @@ def simulate_trades(
     buy_signal: List[Optional[float]] = signals["buy_signal"]
     sell_signal: List[Optional[float]] = signals["sell_signal"]
     allocations = signals.get("buy_allocation", [1.0] * len(close))
+    scores = {side: signals.get(f"{side}_score", [None] * len(close)) for side in ("buy", "sell")}
 
     cost = cost_pct_per_side / 100.0
     environment = PortfolioEnvironment(cost)
@@ -141,7 +142,12 @@ def simulate_trades(
     highest_close = 0.0
     last_entry_index: Optional[int] = None
 
-    def close_trade(exit_i: int, exit_price: float, reason: str) -> None:
+    def execution_fields(fill):
+        return dict(execution_price=fill.after.last_price,
+                    holding_pct=fill.after.current_exposure * 100,
+                    trade_nav_pct=abs(fill.trade_value) / fill.before.nav * 100)
+
+    def close_trade(exit_i: int, exit_price: float, reason: str):
         nonlocal entry_i, realized, cash, units, last_trade_index
         assert entry_i is not None
         # 所有调用方传入未扣费成交价；平仓费用只在这里收取一次。
@@ -164,6 +170,7 @@ def simulate_trades(
         units = 0.0
         last_trade_index = exit_i
         entry_i = None
+        return closed
 
     pending_entry = False
     pending_exit = False
@@ -204,7 +211,8 @@ def simulate_trades(
                     last_trade_index = i
                     if pending_decision is not None:
                         pending_decision.update(status="executed", reason="signal", date=dates[i],
-                                                executed_budget_pct=spend * 100.0, cash_after_pct=cash * 100.0)
+                                                executed_budget_pct=spend * 100.0, cash_after_pct=cash * 100.0,
+                                                **execution_fields(entered))
                     highest_close = 0.0
                     last_entry_index = i
                     if stop_multiple_atr is not None and entry_atr:
@@ -215,10 +223,11 @@ def simulate_trades(
             pending_entry = False
         elif pending_exit and entry_i is not None:
             proceeds = units * open_[i] * (1.0 - cost)
-            close_trade(i, open_[i], "signal")
+            closed = close_trade(i, open_[i], "signal")
             if pending_decision is not None:
                 pending_decision.update(status="executed", reason="signal", date=dates[i],
-                                        executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0)
+                                        executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0,
+                                        **execution_fields(closed))
             pending_exit = False
         else:
             pending_entry = False
@@ -238,10 +247,11 @@ def simulate_trades(
                 if i == entry_i or open_[i] > exit_level:
                     holding_bars += 1
                 proceeds = units * min(open_[i], exit_level) * (1.0 - cost)
-                close_trade(i, min(open_[i], exit_level), reason)
+                closed = close_trade(i, min(open_[i], exit_level), reason)
                 decisions.append(dict(signal_date=dates[i], date=dates[i], side="sell", status="executed",
-                                      reason=reason, suggested_budget_pct=proceeds * 100.0,
-                                      executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0))
+                                      reason=reason, score=None, suggested_budget_pct=proceeds * 100.0,
+                                      executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0,
+                                      **execution_fields(closed)))
                 stop_level = None
                 trail_level = None
             else:
@@ -261,7 +271,9 @@ def simulate_trades(
                 fraction = _clamp(allocations[i], 0.0, 1.0) if size_by_score else 1.0
                 suggested = equity[offset] * fraction if side == "buy" else units * close[i]
                 decision = dict(signal_date=dates[i], date=dates[i], side=side, status="skipped",
-                                reason="signal", suggested_budget_pct=suggested * 100.0,
+                                reason="signal", score=scores[side][i],
+                                holding_pct=environment.mark_to_market(close[i]).current_exposure * 100,
+                                suggested_budget_pct=suggested * 100.0,
                                 executed_budget_pct=0.0, cash_after_pct=cash * 100.0)
                 decisions.append(decision)
                 if side == "buy" and cash <= 1e-12:
@@ -307,11 +319,12 @@ def simulate_trades(
 
     if entry_i is not None:
         proceeds = units * close[end_index] * (1.0 - cost)
-        close_trade(end_index, close[end_index], "segment_end")
+        closed = close_trade(end_index, close[end_index], "segment_end")
         equity[-1] = realized
         decisions.append(dict(signal_date=dates[end_index], date=dates[end_index], side="sell",
-                              status="executed", reason="segment_end", suggested_budget_pct=proceeds * 100.0,
-                              executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0))
+                              status="executed", reason="segment_end", score=None, suggested_budget_pct=proceeds * 100.0,
+                              executed_budget_pct=proceeds * 100.0, cash_after_pct=cash * 100.0,
+                              **execution_fields(closed)))
 
     return {
         "trades": trades,

@@ -356,6 +356,7 @@ class AutoTuneResponse(BaseModel):
     )
     recommended: AutoTuneRecommended = Field(..., description="最终推荐参数")
     allocation: Optional[Dict[str, Any]] = Field(None, description="冻结技术策略后的资金配置比较、转移与 Q 表")
+    test_prices: Optional[Dict[str, Any]] = Field(None, description="Test-session closing prices for execution charts")
     aces: Optional[Dict[str, Any]] = Field(None, description="Independent Strategy G ACES study; A–F remain unchanged")
     fine_tune: Optional[Dict[str, Any]] = Field(
         default=None,

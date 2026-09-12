@@ -1,9 +1,12 @@
 import type React from 'react';
 import { AutoTuneBudgetLedger } from './AutoTuneBudgetLedger';
-import { AutoTuneAllocationPanel } from './AutoTuneAllocationPanel';
-import { ACESResults, ACESSetup } from './ACESPanel';
+import { AutoTuneStrategyView } from './AutoTuneStrategyView';
+import { ACESSetup } from './ACESPanel';
+import { STRATEGY_FAMILIES, formatTriggerText, isVisibleTradeMark, strategyFamilyForKey, strategyFamilyForView, strategyPresentation, type StrategyFamily, type TradeMark } from './autoTunePresentation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneBenchmark, type AutoTuneResponse, type AutoTuneStrategyResult, type AutoTuneTestConfidence, type CompositeBreakdown, type FineTuneSweepPosition, type IndicatorThresholds, type StockIndicatorsResponse } from '../../api/stocks';
+import { toCamelCase } from '../../api/utils';
+import { peekAutoTuneState, readAutoTuneState, writeAutoTuneState } from '../../utils/autoTuneStorage';
 import type { UiTextKey } from '../../i18n/uiText';
 import {
   DEFAULT_INDICATOR_THRESHOLDS,
@@ -27,63 +30,9 @@ const parseDayMs = (value: string) => new Date(`${value}T00:00:00Z`).getTime();
 const formatDayMs = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 // Auto Tune strategy / benchmark line colors for the cumulative-profit plot.
-const AUTO_TUNE_STRATEGY_COLORS: Record<string, string> = {
-  A: '#2f7de1',
-  B: '#22c55e',
-  C: '#f59e0b',
-  D: '#a78bfa',
-  E: '#f97316',
-  F: '#06b6d4',
-};
-const AUTO_TUNE_BENCHMARK_COLORS: Record<string, string> = {
-  sp500_buy_hold: '#ef4444',
-  stock_buy_hold: '#94a3b8',
-  strategy_on_sp500: '#14b8a6',
-};
-
 const PLOT_HEIGHT = 340;
 const PADDING = { top: 16, right: 60, bottom: 40, left: 12 };
 const DATE_TICK_COUNT = 5;
-
-type TriggerGroupKey =
-  | 'macd'
-  | 'obv'
-  | 'kdj'
-  | 'rsi'
-  | 'boll'
-  | 'cci'
-  | 'dmi'
-  | 'mfi'
-  | 'compositeBuy'
-  | 'compositeSell';
-
-const TRIGGER_GROUPS: Array<{
-  key: TriggerGroupKey;
-  label: string;
-  labelKey?: 'priceHistory.compositeBuy' | 'priceHistory.compositeSell';
-}> = [
-  { key: 'compositeBuy', label: 'BUY', labelKey: 'priceHistory.compositeBuy' },
-  { key: 'compositeSell', label: 'SELL', labelKey: 'priceHistory.compositeSell' },
-  { key: 'macd', label: 'MACD' },
-  { key: 'obv', label: 'OBV' },
-  { key: 'kdj', label: 'KDJ' },
-  { key: 'rsi', label: 'RSI' },
-  { key: 'boll', label: 'BOLL' },
-  { key: 'cci', label: 'CCI' },
-  { key: 'dmi', label: 'DMI' },
-  { key: 'mfi', label: 'MFI' },
-];
-
-// Colors and shapes for the extension-factor trigger groups (BOLL/CCI/DMI/MFI).
-const EXTRA_GROUP_STYLES: Record<
-  'boll' | 'cci' | 'dmi' | 'mfi',
-  { buyColor: string; sellColor: string; buyShape: 'circle' | 'square' | 'triangleUp' | 'cross'; sellShape: 'circle' | 'square' | 'triangleDown' | 'cross' }
-> = {
-  boll: { buyColor: '#a78bfa', sellColor: '#7c3aed', buyShape: 'circle', sellShape: 'circle' },
-  cci: { buyColor: '#fbbf24', sellColor: '#d97706', buyShape: 'square', sellShape: 'square' },
-  dmi: { buyColor: '#2dd4bf', sellColor: '#0d9488', buyShape: 'triangleUp', sellShape: 'triangleDown' },
-  mfi: { buyColor: '#f472b6', sellColor: '#db2777', buyShape: 'cross', sellShape: 'cross' },
-};
 
 // Composite score breakdown factor keys, rendered in display order with
 // bilingual labels (classic factors first, extension factors after).
@@ -159,7 +108,7 @@ const AUTOTUNE_STORAGE_PREFIX = 'dsa.autotune.';
 const AUTOTUNE_PRESETS_STORAGE_KEY = 'dsa.autotune.presets';
 
 function hasCurrentMethodology(result: AutoTuneResponse): boolean {
-  return result.methodologyVersion === AUTO_TUNE_METHODOLOGY_VERSION
+  return Number(result.methodologyVersion) === AUTO_TUNE_METHODOLOGY_VERSION
     && (!result.fineTune || result.fineTune.selectionBasis === 'validation');
 }
 
@@ -169,6 +118,8 @@ interface AutoTunePreset {
   timestamp: number;
   result: AutoTuneResponse;
   selectedStrategyKey: string | null;
+  selectedTriggerStrategy?: StrategyFamily;
+  days?: number;
   settings: {
     transactionWindow: number;
     autoTuneYears: number;
@@ -182,6 +133,8 @@ interface AutoTunePreset {
 interface StoredAutoTuneState {
   result: AutoTuneResponse;
   selectedStrategyKey: string | null;
+  selectedTriggerStrategy?: StrategyFamily;
+  days?: number;
   settings: {
     transactionWindow: number;
     autoTuneYears: number;
@@ -198,10 +151,15 @@ function autoTuneStorageKey(stockCode: string): string {
 
 function readStoredAutoTune(stockCode: string): StoredAutoTuneState | null {
   if (typeof window === 'undefined') return null;
+  const session = peekAutoTuneState<StoredAutoTuneState>(autoTuneStorageKey(stockCode));
+  if (session) return session;
   try {
     const raw = window.localStorage.getItem(autoTuneStorageKey(stockCode));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredAutoTuneState;
+    // Previous web versions saved the API's snake_case response directly.
+    // Normalize it on read so methodology_version and benchmark_nav survive a
+    // stock switch exactly like a live API response does.
+    const parsed = toCamelCase<StoredAutoTuneState>(JSON.parse(raw));
     if (parsed?.result?.strategies && Array.isArray(parsed.result.strategies)) {
       return parsed;
     }
@@ -213,11 +171,17 @@ function readStoredAutoTune(stockCode: string): StoredAutoTuneState | null {
 
 function writeStoredAutoTune(stockCode: string, state: StoredAutoTuneState): void {
   if (typeof window === 'undefined') return;
+  // Keep the legacy copy when it fits, but never rely on it for large reports.
+  let legacySaved = false;
   try {
     window.localStorage.setItem(autoTuneStorageKey(stockCode), JSON.stringify(state));
+    legacySaved = true;
   } catch {
-    // best-effort
+    // IndexedDB below is the primary store for full research reports.
   }
+  void writeAutoTuneState(autoTuneStorageKey(stockCode), state).catch(() => {
+    if (!legacySaved) window.dispatchEvent(new Event('dsa-autotune-storage-error'));
+  });
 }
 
 function readStoredPresets(): AutoTunePreset[] {
@@ -502,41 +466,8 @@ const AUTO_TUNE_REASON_KEYS: Record<string, string> = {
 const formatAutoTuneValue = (value: number | null | undefined): string =>
   typeof value === 'number' && Number.isFinite(value) ? String(Number(value.toFixed(4))) : '--';
 
-const formatEquityPct = (value: number): string =>
-  `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
-
 const formatPrice = (value?: number | null): string =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '--';
-
-// Catmull-Rom spline through finite points, producing a single smooth path.
-const buildSmoothLinePath = (
-  values: Array<number | null>,
-  x: (i: number) => number,
-  y: (v: number) => number,
-): string => {
-  const points: Array<{ px: number; py: number }> = [];
-  for (let i = 0; i < values.length; i += 1) {
-    const v = values[i];
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      points.push({ px: x(i), py: y(v) });
-    }
-  }
-  if (points.length === 0) return '';
-  if (points.length === 1) return `M ${points[0].px} ${points[0].py}`;
-  let d = `M ${points[0].px} ${points[0].py}`;
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const p0 = points[Math.max(0, i - 1)];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[Math.min(points.length - 1, i + 2)];
-    const c1x = p1.px + (p2.px - p0.px) / 6;
-    const c1y = p1.py + (p2.py - p0.py) / 6;
-    const c2x = p2.px - (p3.px - p1.px) / 6;
-    const c2y = p2.py - (p3.py - p1.py) / 6;
-    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.px} ${p2.py}`;
-  }
-  return d;
-};
 
 interface LinePath {
   d: string;
@@ -633,22 +564,6 @@ const buildBandPath = (
   }
   flush();
   return d;
-};
-
-interface Marker {
-  index: number;
-  value: number;
-}
-
-const collectMarkers = (series: Array<number | null>): Marker[] => {
-  const out: Marker[] = [];
-  for (let i = 0; i < series.length; i += 1) {
-    const v = series[i];
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      out.push({ index: i, value: v });
-    }
-  }
-  return out;
 };
 
 // ---------------------------------------------------------------------------
@@ -775,10 +690,18 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   } | null>(null);
   const [progressTick, setProgressTick] = useState(0);
   const [autoTuneResult, setAutoTuneResult] = useState<AutoTuneResponse | null>(null);
-  const [acesConfig, setACESConfig] = useState<Record<string, unknown> | undefined>();
+  const [restoredStock, setRestoredStock] = useState<string | null>(null);
+  const activeStock = useRef<string | null>(stockCode);
+  useEffect(() => {
+    activeStock.current = stockCode;
+    return () => { activeStock.current = null; };
+  }, [stockCode]);
+  const [acesConfig, setACESConfig] = useState<Record<string, unknown> | undefined>({
+    version: 1, enabled: true, allocation: { economic: { allowed_max_drawdown: .15 } },
+  });
   const [acesValid, setACESValid] = useState(true);
   const [selectedStrategyKey, setSelectedStrategyKey] = useState<string | null>(null);
-  const [equityHoverIndex, setEquityHoverIndex] = useState<number | null>(null);
+  const [selectedTriggerStrategy, setSelectedTriggerStrategy] = useState<StrategyFamily>('baseline');
   const [autoTuneError, setAutoTuneError] = useState<string | null>(null);
   const [presets, setPresets] = useState<AutoTunePreset[]>([]);
   const [presetNameInput, setPresetNameInput] = useState('');
@@ -786,18 +709,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   const requestSeqRef = useRef(0);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
-  const [visibleTriggers, setVisibleTriggers] = useState<Record<TriggerGroupKey, boolean>>({
-    macd: false,
-    obv: false,
-    kdj: false,
-    rsi: false,
-    boll: false,
-    cci: false,
-    dmi: false,
-    mfi: false,
-    compositeBuy: true,
-    compositeSell: true,
-  });
   const [showCompositeDebug, setShowCompositeDebug] = useState(false);
 
   // Keep the chart sized to its container so the lines fit the current window.
@@ -854,10 +765,17 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
   // Load saved auto-tune results and presets on mount / stock change.
   useEffect(() => {
     setPresets(readStoredPresets());
-    const saved = readStoredAutoTune(stockCode);
+    let cancelled = false;
+    setRestoredStock(null);
+    void readAutoTuneState(autoTuneStorageKey(stockCode), () => readStoredAutoTune(stockCode)).then((saved) => {
+    if (cancelled) return;
     if (saved) {
       setAutoTuneResult(saved.result);
       setSelectedStrategyKey(saved.selectedStrategyKey);
+      setSelectedTriggerStrategy(saved.selectedTriggerStrategy
+        ?? strategyFamilyForKey(saved.selectedStrategyKey ?? saved.result.recommended.strategyKey)
+        ?? 'baseline');
+      if (saved.days != null && DAY_OPTIONS.includes(saved.days)) setDays(saved.days);
       setTransactionWindow(saved.settings.transactionWindow);
       setTransactionWindowRaw(String(saved.settings.transactionWindow));
       setAutoTuneYears(saved.settings.autoTuneYears);
@@ -870,10 +788,21 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     } else {
       setAutoTuneResult(null);
       setSelectedStrategyKey(null);
+      setSelectedTriggerStrategy('baseline');
     }
-    setEquityHoverIndex(null);
     setAutoTuneError(null);
+    setRestoredStock(stockCode);
+    });
+    return () => { cancelled = true; };
   }, [stockCode]);
+
+  useEffect(() => {
+    const onStorageError = () => setAutoTuneError(language === 'zh'
+      ? '无法永久保存 Auto Tune 结果。当前会话仍可查看，请勿关闭页面。'
+      : 'Auto Tune could not be saved permanently. Results remain available in this session; keep this page open.');
+    window.addEventListener('dsa-autotune-storage-error', onStorageError);
+    return () => window.removeEventListener('dsa-autotune-storage-error', onStorageError);
+  }, [language]);
 
   const handleThresholdChange = useCallback((key: keyof IndicatorThresholds, raw: string) => {
     const parsed = Number(raw);
@@ -952,13 +881,13 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           : {}),
       });
       recordAutoTuneDuration(durationSignature, Date.now() - startedAt);
-      setAutoTuneResult(response);
-      setSelectedStrategyKey(null);
-      setEquityHoverIndex(null);
-      // Persist results so they survive stock switch / page reload.
+      const nextTriggerStrategy = strategyFamilyForKey(response.recommended.strategyKey) ?? 'baseline';
+      // Save under the stock that started the request, even after navigation.
       writeStoredAutoTune(stockCode, {
         result: response,
         selectedStrategyKey: null,
+        selectedTriggerStrategy: nextTriggerStrategy,
+        days,
         settings: {
           transactionWindow,
           autoTuneYears,
@@ -968,14 +897,18 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           fineTuneDays,
         },
       });
+      if (activeStock.current === stockCode) {
+        setAutoTuneResult(response);
+        setSelectedStrategyKey(null);
+        setSelectedTriggerStrategy(nextTriggerStrategy);
+      }
     } catch (err) {
-      setAutoTuneResult(null);
-      setAutoTuneError(err instanceof Error ? err.message : String(err));
+      if (activeStock.current === stockCode) setAutoTuneError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsTuning(false);
       setTuneProgress(null);
     }
-  }, [autoTuneTestYears, autoTuneYears, stockCode, transactionWindow, trainRangeDates, trainRangePct, fineTuneEnabled, fineTuneDays, acesConfig]);
+  }, [autoTuneTestYears, autoTuneYears, stockCode, transactionWindow, trainRangeDates, trainRangePct, fineTuneEnabled, fineTuneDays, acesConfig, days]);
 
   // Tick while tuning so the progress bar/elapsed time re-renders.
   useEffect(() => {
@@ -1012,14 +945,14 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     };
   }, [tuneProgress, progressTick]);
 
-  // Persist selected strategy key whenever it changes (after user clicks a row).
+  // Persist selected strategy and chart state whenever it changes.
   useEffect(() => {
-    if (!autoTuneResult) return;
+    if (!autoTuneResult || restoredStock !== stockCode) return;
     const saved = readStoredAutoTune(stockCode);
     if (saved) {
-      writeStoredAutoTune(stockCode, { ...saved, selectedStrategyKey });
+      writeStoredAutoTune(stockCode, { ...saved, result: autoTuneResult, selectedStrategyKey, selectedTriggerStrategy, days });
     }
-  }, [selectedStrategyKey, autoTuneResult, stockCode]);
+  }, [selectedStrategyKey, selectedTriggerStrategy, days, autoTuneResult, stockCode, restoredStock]);
 
   const applyAutoTunedThresholds = useCallback(() => {
     if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult)) return;
@@ -1042,15 +975,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     void load(days, next);
   }, [days, load, stockCode]);
 
-  const applyJointThresholds = useCallback((buy: number, sell: number) => {
-    if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult)) return;
-    const next = normalizeThresholds({ ...DEFAULT_THRESHOLDS,
-      compositeBuyThreshold: buy, compositeSellThreshold: -sell });
-    setThresholds(next);
-    writeStoredThresholds(stockCode, next);
-    void load(days, next);
-  }, [autoTuneResult, days, load, stockCode]);
-
   // --- Preset management ---------------------------------------------------
   const savePreset = useCallback(() => {
     if (!autoTuneResult || !hasCurrentMethodology(autoTuneResult) || !presetNameInput.trim()) return;
@@ -1060,6 +984,8 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       timestamp: Date.now(),
       result: autoTuneResult,
       selectedStrategyKey,
+      selectedTriggerStrategy,
+      days,
       settings: {
         transactionWindow,
         autoTuneYears,
@@ -1074,11 +1000,15 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     writeStoredPresets(next);
     setPresetNameInput('');
     setShowPresetInput(false);
-  }, [autoTuneResult, presetNameInput, presets, selectedStrategyKey, transactionWindow, autoTuneYears, autoTuneTestYears, trainRangePct, fineTuneEnabled, fineTuneDays]);
+  }, [autoTuneResult, presetNameInput, presets, selectedStrategyKey, selectedTriggerStrategy, days, transactionWindow, autoTuneYears, autoTuneTestYears, trainRangePct, fineTuneEnabled, fineTuneDays]);
 
   const loadPreset = useCallback((preset: AutoTunePreset) => {
     setAutoTuneResult(preset.result);
     setSelectedStrategyKey(preset.selectedStrategyKey);
+    setSelectedTriggerStrategy(preset.selectedTriggerStrategy
+      ?? strategyFamilyForKey(preset.selectedStrategyKey ?? preset.result.recommended.strategyKey)
+      ?? 'baseline');
+    if (preset.days != null && DAY_OPTIONS.includes(preset.days)) setDays(preset.days);
     setTransactionWindow(preset.settings.transactionWindow);
     setTransactionWindowRaw(String(preset.settings.transactionWindow));
     setAutoTuneYears(preset.settings.autoTuneYears);
@@ -1088,15 +1018,18 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     setFineTuneEnabled(preset.settings.fineTuneEnabled ?? false);
     setFineTuneDays(preset.settings.fineTuneDays ?? 360);
     setFineTuneDaysRaw(String(preset.settings.fineTuneDays ?? 360));
-    setEquityHoverIndex(null);
     setAutoTuneError(null);
     // Also persist as the "last" state for this stock.
     writeStoredAutoTune(stockCode, {
       result: preset.result,
       selectedStrategyKey: preset.selectedStrategyKey,
+      selectedTriggerStrategy: preset.selectedTriggerStrategy
+        ?? strategyFamilyForKey(preset.selectedStrategyKey ?? preset.result.recommended.strategyKey)
+        ?? 'baseline',
+      days: preset.days ?? days,
       settings: preset.settings,
     });
-  }, [stockCode]);
+  }, [days, stockCode]);
 
   const deletePreset = useCallback((presetId: string) => {
     const next = presets.filter((p) => p.id !== presetId);
@@ -1160,98 +1093,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     }
     return rows;
   }, [selectedAutoTuneStrategy]);
-
-  // Cumulative-profit curves over the test window for all strategies + benchmarks.
-  const autoTuneEquityPlot = useMemo(() => {
-    if (!autoTuneResult) return null;
-    const seriesList: Array<{
-      key: string;
-      label: string;
-      color: string;
-      dashed: boolean;
-      values: number[];
-    }> = [];
-    for (const strategy of autoTuneResult.strategies) {
-      if (strategy.testEquity && strategy.testEquity.values.length > 1) {
-        seriesList.push({
-          key: strategy.key,
-          label: (language === 'zh' ? strategy.nameZh : strategy.nameEn) || strategy.key,
-          color: AUTO_TUNE_STRATEGY_COLORS[strategy.key] ?? '#8884d8',
-          dashed: false,
-          values: strategy.testEquity.values,
-        });
-      }
-    }
-    for (const benchmark of autoTuneResult.benchmarks) {
-      if (benchmark.available && benchmark.testEquity && benchmark.testEquity.values.length > 1) {
-        seriesList.push({
-          key: benchmark.key,
-          label: (language === 'zh' ? benchmark.nameZh : benchmark.nameEn) || benchmark.key,
-          color: AUTO_TUNE_BENCHMARK_COLORS[benchmark.key] ?? '#94a3b8',
-          dashed: true,
-          values: benchmark.testEquity.values,
-        });
-      }
-    }
-    if (seriesList.length === 0) return null;
-
-    const allValues = seriesList.flatMap((series) => series.values);
-    let min = Math.min(0, ...allValues);
-    let max = Math.max(0, ...allValues);
-    const span = max - min || 1;
-    min -= span * 0.06;
-    max += span * 0.06;
-
-    const width = containerWidth > 0 ? containerWidth : 720;
-    const left = 12;
-    const right = 60;
-    const top = 8;
-    const plotHeight = 120;
-    const axisY = top + plotHeight + 16;
-    const x = (index: number, length: number) =>
-      left + (length > 1 ? index / (length - 1) : 0) * (width - left - right);
-    const y = (value: number) => top + ((max - value) / (max - min)) * plotHeight;
-
-    const dates = autoTuneResult.strategies.find(
-      (strategy) => strategy.testEquity && strategy.testEquity.dates.length > 0,
-    )?.testEquity?.dates ?? [];
-    const tickCount = dates.length > 1 ? Math.min(5, dates.length) : dates.length;
-    const dateTicks = Array.from({ length: tickCount }, (_unused, i) => {
-      const index = tickCount > 1
-        ? Math.round((i / (tickCount - 1)) * (dates.length - 1))
-        : 0;
-      return { x: x(index, dates.length), label: dates[index]?.slice(0, 7) ?? '' };
-    });
-
-    // Nice round horizontal gridlines between min and max.
-    const rawStep = (max - min) / 4;
-    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
-    const step = Math.ceil(rawStep / magnitude) * magnitude;
-    const gridTicks: number[] = [];
-    for (let value = Math.ceil(min / step) * step; value <= max; value += step) {
-      gridTicks.push(Math.round(value * 100) / 100);
-    }
-
-    return {
-      seriesList,
-      width,
-      left,
-      right,
-      top,
-      plotWidth: width - left - right,
-      refLength: seriesList[0]?.values.length ?? dates.length,
-      dates,
-      x,
-      y,
-      dateTicks,
-      gridTicks,
-      axisY,
-    };
-  }, [autoTuneResult, containerWidth, language]);
-
-  const toggleTrigger = useCallback((key: TriggerGroupKey) => {
-    setVisibleTriggers((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, []);
 
   const geometry = useMemo(() => {
     if (!result || result.dates.length === 0) return null;
@@ -1332,52 +1173,24 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
     return buildBandPath(result.bolu ?? [], result.bold ?? [], geometry.x, geometry.y);
   }, [result, geometry]);
 
-  const markers = useMemo(() => {
-    if (!result) return null;
-    const collect = (series?: Array<number | null>): Marker[] => collectMarkers(series ?? []);
-    return {
-      macdBuy: collect(result.triggers.macdBuy),
-      macdSell: collect(result.triggers.macdSell),
-      obvBuy: collect(result.triggers.obvBuy),
-      obvSell: collect(result.triggers.obvSell),
-      kdjBuy: collect(result.triggers.kdjBuy),
-      kdjSell: collect(result.triggers.kdjSell),
-      rsiBuy: collect(result.triggers.rsiBuy),
-      rsiSell: collect(result.triggers.rsiSell),
-      bollBuy: collect(result.triggers.bollBuy),
-      bollSell: collect(result.triggers.bollSell),
-      cciBuy: collect(result.triggers.cciBuy),
-      cciSell: collect(result.triggers.cciSell),
-      dmiBuy: collect(result.triggers.dmiBuy),
-      dmiSell: collect(result.triggers.dmiSell),
-      mfiBuy: collect(result.triggers.mfiBuy),
-      mfiSell: collect(result.triggers.mfiSell),
-    };
-  }, [result]);
+  const selectedTriggerView = useMemo(
+    () => autoTuneResult
+      ? strategyPresentation(autoTuneResult, strategyFamilyForView(autoTuneResult, selectedTriggerStrategy, selectedStrategyKey))
+      : null,
+    [autoTuneResult, selectedStrategyKey, selectedTriggerStrategy],
+  );
 
-  const compositeMarkers = useMemo(() => {
-    const composite = result?.composite;
-    if (!composite) return null;
-    const buy: Array<{ marker: Marker; score: number }> = [];
-    const sell: Array<{ marker: Marker; score: number }> = [];
-    const buySignal = composite.buySignal ?? [];
-    const sellSignal = composite.sellSignal ?? [];
-    const buyScore = composite.buyScore ?? [];
-    const sellScore = composite.sellScore ?? [];
-    for (let i = 0; i < buySignal.length; i += 1) {
-      const v = buySignal[i];
-      if (typeof v === 'number' && Number.isFinite(v)) {
-        buy.push({ marker: { index: i, value: v }, score: buyScore[i] ?? 0 });
-      }
-    }
-    for (let i = 0; i < sellSignal.length; i += 1) {
-      const v = sellSignal[i];
-      if (typeof v === 'number' && Number.isFinite(v)) {
-        sell.push({ marker: { index: i, value: v }, score: sellScore[i] ?? 0 });
-      }
-    }
-    return { buy, sell };
-  }, [result]);
+  const strategyMarkers = useMemo(() => {
+    if (!result || !selectedTriggerView) return [];
+    const indexByDate = new Map(result.dates.map((date, index) => [date, index]));
+    return selectedTriggerView.marks
+      .filter(isVisibleTradeMark)
+      .flatMap((mark) => {
+        const index = indexByDate.get(mark.date);
+        if (index == null || typeof result.close[index] !== 'number') return [];
+        return [{ mark, index, value: result.close[index] }];
+      });
+  }, [result, selectedTriggerView]);
 
   const latestComposite = useMemo(() => {
     const composite = result?.composite;
@@ -1408,65 +1221,17 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       ? `${result.dates[0]} ~ ${result.dates[result.dates.length - 1]}`
       : result?.dates[0] ?? '--';
 
-  const renderMarker = (marker: Marker, kind: 'circle' | 'triangleUp' | 'triangleDown' | 'square' | 'cross', color: string, label?: boolean) => {
+  const renderStrategyMarker = (entry: { mark: TradeMark; index: number; value: number }, markerIndex: number) => {
     if (!geometry) return null;
-    const cx = geometry.x(marker.index);
-    const cy = geometry.y(marker.value);
-    const key = `${kind}-${marker.index}-${marker.value}`;
-    const size = 6;
-    let shape: React.ReactNode = null;
-    if (kind === 'circle') {
-      shape = <circle cx={cx} cy={cy} r={size} fill={color} stroke="#fff" strokeWidth={1} />;
-    } else if (kind === 'cross') {
-      shape = (
-        <g stroke={color} strokeWidth={2} strokeLinecap="round">
-          <line x1={cx - size - 1} y1={cy - size - 1} x2={cx + size + 1} y2={cy + size + 1} />
-          <line x1={cx - size - 1} y1={cy + size + 1} x2={cx + size + 1} y2={cy - size - 1} />
-        </g>
-      );
-    } else if (kind === 'square') {
-      shape = (
-        <rect x={cx - size} y={cy - size} width={size * 2} height={size * 2} fill={color} stroke="#fff" strokeWidth={1} />
-      );
-    } else if (kind === 'triangleUp') {
-      shape = (
-        <polygon
-          points={`${cx},${cy - size - 2} ${cx - size - 1},${cy + size} ${cx + size + 1},${cy + size}`}
-          fill={color}
-          stroke="#fff"
-          strokeWidth={1}
-        />
-      );
-    } else {
-      shape = (
-        <polygon
-          points={`${cx},${cy + size + 2} ${cx - size - 1},${cy - size} ${cx + size + 1},${cy - size}`}
-          fill={color}
-          stroke="#fff"
-          strokeWidth={1}
-        />
-      );
-    }
-    return (
-      <g key={key}>
-        {shape}
-        {label ? (
-          <text x={cx + size + 2} y={cy - size - 2} fontSize="10" fill={color} fontWeight={600}>
-            {formatPrice(marker.value)}
-          </text>
-        ) : null}
-      </g>
-    );
-  };
-
-  const renderCompositeMarker = (marker: Marker, score: number, kind: 'buy' | 'sell') => {
-    if (!geometry) return null;
-    const cx = geometry.x(marker.index);
-    const cy = geometry.y(marker.value);
-    const color = kind === 'buy' ? BUY : SELL;
+    const { mark } = entry;
+    const cx = geometry.x(entry.index);
+    const cy = geometry.y(entry.value);
+    const buy = mark.side.toUpperCase() === 'BUY';
+    const color = buy ? BUY : SELL;
     const size = 5;
-    const key = `composite-${kind}-${marker.index}-${marker.value}`;
-    const shape = kind === 'buy' ? (
+    const key = `strategy-${selectedTriggerStrategy}-${mark.date}-${markerIndex}`;
+    const markerLabel = `${mark.date} · ${mark.side} · ${formatTriggerText(mark)} · ${mark.reason}`;
+    const shape = buy ? (
       <polygon
         points={`${cx},${cy - size - 2} ${cx - size - 1},${cy + size} ${cx + size + 1},${cy + size}`}
         fill={color}
@@ -1482,10 +1247,11 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       />
     );
     return (
-      <g key={key}>
+      <g key={key} role="img" aria-label={markerLabel}>
         {shape}
-        <text x={cx + size + 2} y={cy - size - 2} fontSize="10" fill={color} fontWeight={700}>
-          {kind === 'buy' ? `BUY ${score}` : `SELL ${score}`}
+        <title>{markerLabel}</title>
+        <text x={cx} y={cy + (buy ? 17 : -14)} textAnchor="middle" fontSize="8" fill={color} fontWeight={600}>
+          {formatTriggerText(mark)}
         </text>
       </g>
     );
@@ -1508,11 +1274,11 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       </div>
 
       {thresholds ? (
-        <div className="order-3">
+        <div className="order-2">
         <>
-        <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs font-medium text-secondary-text">{t('priceHistory.thresholds')}</div>
+        <details className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          <summary className="cursor-pointer text-xs font-medium text-secondary-text">{t('priceHistory.thresholds')}</summary>
+          <div className="mt-2 flex items-center justify-between gap-2">
             <Button variant="secondary" size="sm" onClick={restoreDefaultThresholds}>
               {t('priceHistory.autoTune.restoreDefault')}
             </Button>
@@ -1576,32 +1342,10 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               ))}
             </div>
           </div>
-        </div>
+        </details>
         <div className="mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
           <div className="text-xs font-medium text-secondary-text">{t('priceHistory.autoTune.title')}</div>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
-            <label className="flex items-center gap-1 text-xs text-secondary-text">
-              <span>{t('priceHistory.autoTune.windowLabel')}</span>
-              <input
-                type="number"
-                min="10"
-                max="365"
-                value={transactionWindowRaw}
-                onChange={(event) => setTransactionWindowRaw(event.target.value)}
-                onBlur={() => {
-                  if (transactionWindowRaw.trim() === '') {
-                    setTransactionWindowRaw(String(transactionWindow));
-                    return;
-                  }
-                  const parsed = Number(transactionWindowRaw);
-                  const clamped = Math.min(365, Math.max(10, isNaN(parsed) ? 90 : parsed));
-                  setTransactionWindow(clamped);
-                  setTransactionWindowRaw(String(clamped));
-                }}
-                className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
-              />
-              <span>D</span>
-            </label>
             <label className="flex items-center gap-1 text-xs text-secondary-text">
               <span>{t('priceHistory.autoTune.history')}</span>
               <input
@@ -1637,6 +1381,36 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                   </option>
                 ))}
               </select>
+            </label>
+            <Button variant="primary" size="sm" className="sm:ml-auto" onClick={() => void runAutoTune()} disabled={isTuning || !acesValid}>
+              {isTuning ? t('priceHistory.autoTune.running') : t('priceHistory.autoTune.button')}
+            </Button>
+          </div>
+        </div>
+        <details className="mb-3 rounded border border-border p-3 text-xs">
+          <summary className="cursor-pointer">{language === 'zh' ? '高级调优设置' : 'Advanced tuning settings'}</summary>
+          <div className="my-3 flex flex-wrap gap-3">
+            <label className="flex items-center gap-1 text-xs text-secondary-text">
+              <span>{t('priceHistory.autoTune.windowLabel')}</span>
+              <input
+                type="number"
+                min="10"
+                max="365"
+                value={transactionWindowRaw}
+                onChange={(event) => setTransactionWindowRaw(event.target.value)}
+                onBlur={() => {
+                  if (transactionWindowRaw.trim() === '') {
+                    setTransactionWindowRaw(String(transactionWindow));
+                    return;
+                  }
+                  const parsed = Number(transactionWindowRaw);
+                  const clamped = Math.min(365, Math.max(10, isNaN(parsed) ? 90 : parsed));
+                  setTransactionWindow(clamped);
+                  setTransactionWindowRaw(String(clamped));
+                }}
+                className="w-16 rounded-md border border-border/70 bg-card px-2 py-1 text-xs text-foreground"
+              />
+              <span>D</span>
             </label>
             <label className="flex items-center gap-1 text-xs text-secondary-text">
               <input
@@ -1683,12 +1457,9 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 ))}
               </select>
             ) : null}
-            <Button variant="primary" size="sm" className="sm:ml-auto" onClick={() => void runAutoTune()} disabled={isTuning || !acesValid}>
-              {isTuning ? t('priceHistory.autoTune.running') : t('priceHistory.autoTune.button')}
-            </Button>
           </div>
-        </div>
-        <ACESSetup language={language} disabled={isTuning} onChange={(config, valid) => { setACESConfig(config); setACESValid(valid); }} />
+          <ACESSetup initiallyEnabled language={language} disabled={isTuning} onChange={(config, valid) => { setACESConfig(config); setACESValid(valid); }} />
+        </details>
         {isTuning && tuneProgressInfo ? (
           <div className="mt-2">
             <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-xs text-secondary-text">
@@ -1723,12 +1494,14 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
       ) : null}
 
       {autoTuneResult ? (
-        <div className="order-4 mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+        <div className="order-3 mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
           {!isCurrentAutoTune ? (
             <p role="alert" className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-500">
               {t('priceHistory.autoTune.outdatedResult')}
             </p>
           ) : null}
+          <details>
+            <summary className="cursor-pointer text-xs text-secondary-text">{language === 'zh' ? '研究详情与参数' : 'Research details and parameters'}</summary>
           {isCurrentAutoTune && autoTuneResult.walkForward ? (
             <p className="mb-2 text-xs text-secondary-text">
               {t('priceHistory.autoTune.walkForward', { count: String(autoTuneResult.walkForward.folds.length) })}
@@ -1886,172 +1659,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               short: String(autoTuneResult.assumptions.capitalGainsTaxShortTermPct ?? ''),
             })}
           </div>
-          <AutoTuneBudgetLedger decisions={selectedAutoTuneStrategy?.testDecisions} language={language} />
-          <AutoTuneAllocationPanel report={autoTuneResult.allocation} language={language} onApplyThresholds={isCurrentAutoTune ? applyJointThresholds : undefined} />
-          <ACESResults report={autoTuneResult.aces} language={language} />
-          {autoTuneEquityPlot ? (
-            <div className="mt-3">
-              <div className="mb-1 text-xs font-medium text-secondary-text">
-                {t('priceHistory.autoTune.cumulativeTitle')}
-              </div>
-              <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                {autoTuneEquityPlot.seriesList.map((series) => {
-                  const isSelected = series.key === selectedAutoTuneKey;
-                  const lastValue = series.values[series.values.length - 1];
-                  return (
-                    <span
-                      key={series.key}
-                      className={`flex items-center gap-1.5 ${isSelected ? 'font-semibold text-foreground' : 'text-secondary-text'}`}
-                    >
-                      <span
-                        className="inline-block h-0.5 w-5"
-                        style={{
-                          background: series.dashed ? 'transparent' : series.color,
-                          backgroundImage: series.dashed
-                            ? `repeating-linear-gradient(to right, ${series.color} 0 4px, transparent 4px 7px)`
-                            : undefined,
-                        }}
-                      />
-                      {series.label}
-                      {typeof lastValue === 'number' && Number.isFinite(lastValue) ? (
-                        <span className={`tabular-nums ${lastValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {formatEquityPct(lastValue)}
-                        </span>
-                      ) : null}
-                    </span>
-                  );
-                })}
-              </div>
-              <div className="relative">
-                <svg
-                  width={autoTuneEquityPlot.width}
-                  viewBox={`0 0 ${autoTuneEquityPlot.width} 160`}
-                  role="img"
-                  aria-label={t('priceHistory.autoTune.cumulativeTitle')}
-                  className="block h-40 w-full"
-                  onMouseMove={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    if (rect.width <= 0) return;
-                    const px = ((event.clientX - rect.left) / rect.width) * autoTuneEquityPlot.width;
-                    const ratio = (px - autoTuneEquityPlot.left) / Math.max(autoTuneEquityPlot.plotWidth, 1);
-                    const index = Math.round(ratio * Math.max(autoTuneEquityPlot.refLength - 1, 0));
-                    setEquityHoverIndex(index >= 0 && index < autoTuneEquityPlot.refLength ? index : null);
-                  }}
-                  onMouseLeave={() => setEquityHoverIndex(null)}
-                >
-                  {autoTuneEquityPlot.gridTicks.map((value) => (
-                    <g key={`equity-tick-${value}`}>
-                      <line
-                        x1={autoTuneEquityPlot.left}
-                        x2={autoTuneEquityPlot.width - autoTuneEquityPlot.right}
-                        y1={autoTuneEquityPlot.y(value)}
-                        y2={autoTuneEquityPlot.y(value)}
-                        stroke="var(--border)"
-                        strokeOpacity={Math.abs(value) < 1e-9 ? '0.6' : '0.35'}
-                      />
-                      <text
-                        x={autoTuneEquityPlot.width - autoTuneEquityPlot.right + 6}
-                        y={autoTuneEquityPlot.y(value) + 3}
-                        fontSize="10"
-                        fill="#ffffff"
-                      >
-                        {value}%
-                      </text>
-                    </g>
-                  ))}
-                  {equityHoverIndex !== null ? (
-                    <line
-                      x1={autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength)}
-                      x2={autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength)}
-                      y1={autoTuneEquityPlot.top}
-                      y2={autoTuneEquityPlot.axisY}
-                      stroke="var(--border)"
-                      strokeOpacity="0.9"
-                      strokeDasharray="3 3"
-                    />
-                  ) : null}
-                  {autoTuneEquityPlot.dateTicks.map((tick, index) => (
-                    <text
-                      key={`equity-date-${index}`}
-                      x={tick.x}
-                      y={autoTuneEquityPlot.axisY + 12}
-                      fontSize="10"
-                      fill="#ffffff"
-                      textAnchor={
-                        index === 0 ? 'start' : index === autoTuneEquityPlot.dateTicks.length - 1 ? 'end' : 'middle'
-                      }
-                    >
-                      {tick.label}
-                    </text>
-                  ))}
-                  {autoTuneEquityPlot.seriesList.map((series) => {
-                    const isSelected = series.key === selectedAutoTuneKey;
-                    return (
-                      <path
-                        key={`equity-${series.key}`}
-                        d={buildSmoothLinePath(
-                          series.values,
-                          (i) => autoTuneEquityPlot.x(i, series.values.length),
-                          autoTuneEquityPlot.y,
-                        )}
-                        fill="none"
-                        stroke={series.color}
-                        strokeWidth={isSelected ? '3' : series.dashed ? '1.5' : '2'}
-                        strokeDasharray={series.dashed ? '6 4' : undefined}
-                        strokeLinejoin="round"
-                        strokeLinecap="round"
-                        opacity={isSelected ? '1' : series.dashed ? '0.7' : '0.85'}
-                      />
-                    );
-                  })}
-                  {equityHoverIndex !== null
-                    ? autoTuneEquityPlot.seriesList.map((series) => {
-                        const value = series.values[equityHoverIndex];
-                        if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-                        return (
-                          <circle
-                            key={`equity-dot-${series.key}`}
-                            cx={autoTuneEquityPlot.x(equityHoverIndex, series.values.length)}
-                            cy={autoTuneEquityPlot.y(value)}
-                            r={series.key === selectedAutoTuneKey ? 4 : 3}
-                            fill={series.color}
-                          />
-                        );
-                      })
-                    : null}
-                </svg>
-                {equityHoverIndex !== null && autoTuneEquityPlot.dates[equityHoverIndex] ? (
-                  <div
-                    className="pointer-events-none absolute top-1 z-10 min-w-[150px] rounded-lg border border-border/70 bg-card/95 p-2 text-xs shadow-lg"
-                    style={{
-                      left: `${(autoTuneEquityPlot.x(equityHoverIndex, autoTuneEquityPlot.refLength) / autoTuneEquityPlot.width) * 100}%`,
-                      transform:
-                        equityHoverIndex > autoTuneEquityPlot.refLength * 0.55
-                          ? 'translateX(calc(-100% - 10px))'
-                          : 'translateX(10px)',
-                    }}
-                  >
-                    <div className="mb-1 font-medium text-secondary-text">
-                      {autoTuneEquityPlot.dates[equityHoverIndex]}
-                    </div>
-                    {autoTuneEquityPlot.seriesList.map((series) => {
-                      const value = series.values[equityHoverIndex];
-                      if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-                      return (
-                        <div key={`equity-tip-${series.key}`} className="flex items-center gap-1.5 whitespace-nowrap">
-                          <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: series.color }} />
-                          <span className="truncate text-secondary-text">{series.label}</span>
-                          <span className={`ml-auto pl-2 font-medium tabular-nums ${value >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {formatEquityPct(value)}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
           <div className="mt-2 text-xs text-secondary-text">
             {t('priceHistory.autoTune.recommended')}
             {': '}
@@ -2202,7 +1809,6 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                     <span>{t('priceHistory.autoTune.trades')}: {autoTuneResult.fineTune.finalTest.metrics.trades}</span>
                   </div>
                   <AutoTuneBudgetLedger decisions={autoTuneResult.fineTune.finalTest.decisions} language={language} />
-                  <AutoTuneAllocationPanel report={autoTuneResult.fineTune.finalTest.allocation} language={language} onApplyThresholds={isCurrentAutoTune ? applyJointThresholds : undefined} />
                   {autoTuneResult.fineTune.finalTest.confidence ? (
                     <TestConfidence confidence={autoTuneResult.fineTune.finalTest.confidence} />
                   ) : null}
@@ -2267,15 +1873,19 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               ) : null}
             </div>
           ) : null}
+          <details className="mt-3 text-xs"><summary>{language === 'zh' ? '预算和 ACES 诊断' : 'Budget and ACES diagnostics'}</summary><pre className="max-h-96 overflow-auto">{JSON.stringify({ allocation: autoTuneResult.allocation, aces: autoTuneResult.aces }, null, 2)}</pre></details>
+          </details>
         </div>
       ) : null}
       {autoTuneError ? (
-        <div className="order-3 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-400">
+        <div className="order-4 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-400">
           {t('priceHistory.autoTune.error')}: {autoTuneError}
         </div>
       ) : null}
 
-      <div className="order-1 mb-4 flex flex-wrap items-center gap-2">
+      <details className="order-1" open>
+      <summary className="mb-3 cursor-pointer text-xs text-secondary-text">{language === 'zh' ? '技术指标价格图' : 'Technical indicator price chart'}</summary>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <span className="text-xs font-medium text-secondary-text">{t('priceHistory.daysLabel')}</span>
         <div className="flex flex-wrap items-center gap-1.5">
           {DAY_OPTIONS.map((value) => (
@@ -2296,30 +1906,26 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
           ))}
         </div>
         <span className="mx-1 hidden h-4 w-px bg-border/60 sm:block" aria-hidden />
-        <span className="text-xs font-medium text-secondary-text">{t('priceHistory.triggers')}</span>
-        {TRIGGER_GROUPS.map(({ key, label, labelKey }) => (
-          <button
-            key={key}
-            type="button"
-            aria-pressed={visibleTriggers[key]}
-            onClick={() => toggleTrigger(key)}
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
-              visibleTriggers[key]
-                ? 'border-primary/50 bg-primary/10 text-primary'
-                : 'border-border/70 bg-background/50 text-muted-text hover:bg-hover hover:text-secondary-text'
-            }`}
+        <label className="flex items-center gap-1.5 text-xs font-medium text-secondary-text">
+          <span>{t('priceHistory.triggerStrategy')}</span>
+          <select
+            aria-label={t('priceHistory.triggerStrategy')}
+            data-testid="trigger-strategy-select"
+            value={selectedTriggerStrategy}
+            disabled={!autoTuneResult}
+            onChange={(event) => setSelectedTriggerStrategy(event.target.value as StrategyFamily)}
+            className="rounded-lg border border-border/70 bg-background/50 px-2 py-1 text-xs font-medium text-foreground disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span
-              className={`inline-block h-2 w-2 rounded-full ${
-                visibleTriggers[key] ? 'bg-primary' : 'bg-border'
-              }`}
-            />
-            {labelKey ? t(labelKey) : label}
-          </button>
-        ))}
+            {STRATEGY_FAMILIES.map((family) => (
+              <option key={family.key} value={family.key}>
+                {language === 'zh' ? family.zh : family.en}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
-      <div className="order-2">
+      <div>
       {isLoading && !result ? (
         <DashboardStateBlock loading title={t('priceHistory.loading')} />
       ) : error ? (
@@ -2405,41 +2011,7 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
                 />
               ))}
 
-              {visibleTriggers.kdj ? markers?.kdjBuy.map((m) => renderMarker(m, 'square', BUY)) : null}
-              {visibleTriggers.macd ? markers?.macdBuy.map((m) => renderMarker(m, 'circle', BUY, true)) : null}
-              {visibleTriggers.obv ? markers?.obvBuy.map((m) => renderMarker(m, 'triangleUp', BUY)) : null}
-              {visibleTriggers.rsi ? markers?.rsiBuy.map((m) => renderMarker(m, 'cross', BUY)) : null}
-              {visibleTriggers.boll
-                ? markers?.bollBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.boll.buyShape, BUY))
-                : null}
-              {visibleTriggers.cci
-                ? markers?.cciBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.cci.buyShape, BUY))
-                : null}
-              {visibleTriggers.dmi
-                ? markers?.dmiBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.dmi.buyShape, BUY))
-                : null}
-              {visibleTriggers.mfi
-                ? markers?.mfiBuy.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.mfi.buyShape, BUY))
-                : null}
-              {visibleTriggers.kdj ? markers?.kdjSell.map((m) => renderMarker(m, 'square', SELL)) : null}
-              {visibleTriggers.macd ? markers?.macdSell.map((m) => renderMarker(m, 'circle', SELL, true)) : null}
-              {visibleTriggers.obv ? markers?.obvSell.map((m) => renderMarker(m, 'triangleDown', SELL)) : null}
-              {visibleTriggers.rsi ? markers?.rsiSell.map((m) => renderMarker(m, 'cross', SELL)) : null}
-              {visibleTriggers.boll
-                ? markers?.bollSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.boll.sellShape, SELL))
-                : null}
-              {visibleTriggers.cci
-                ? markers?.cciSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.cci.sellShape, SELL))
-                : null}
-              {visibleTriggers.dmi
-                ? markers?.dmiSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.dmi.sellShape, SELL))
-                : null}
-              {visibleTriggers.mfi
-                ? markers?.mfiSell.map((m) => renderMarker(m, EXTRA_GROUP_STYLES.mfi.sellShape, SELL))
-                : null}
-
-              {visibleTriggers.compositeBuy ? compositeMarkers?.buy.map(({ marker, score }) => renderCompositeMarker(marker, score, 'buy')) : null}
-              {visibleTriggers.compositeSell ? compositeMarkers?.sell.map(({ marker, score }) => renderCompositeMarker(marker, score, 'sell')) : null}
+              {strategyMarkers.map((entry, index) => renderStrategyMarker(entry, index))}
 
               <rect
                 x={PADDING.left}
@@ -2497,83 +2069,13 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
               <span className="inline-block h-0.5 w-5" style={{ background: COLOR_CLOSE }} />
               {t('priceHistory.legend.close')}
             </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.macd ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: BUY }} />
-              {t('priceHistory.legend.macdBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.macd ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: SELL }} />
-              {t('priceHistory.legend.macdSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.obv ? '' : 'opacity-40'}`}>
+            <span className="flex items-center gap-1.5">
               <span style={{ color: BUY }}>▲</span>
-              {t('priceHistory.legend.obvBuy')}
+              {language === 'zh' ? '买入' : 'Buy'}
             </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.obv ? '' : 'opacity-40'}`}>
+            <span className="flex items-center gap-1.5">
               <span style={{ color: SELL }}>▼</span>
-              {t('priceHistory.legend.obvSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.kdj ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5" style={{ background: BUY }} />
-              {t('priceHistory.legend.kdjBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.kdj ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5" style={{ background: SELL }} />
-              {t('priceHistory.legend.kdjSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.rsi ? '' : 'opacity-40'}`}>
-              <span style={{ color: BUY }}>✕</span>
-              {t('priceHistory.legend.rsiBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.rsi ? '' : 'opacity-40'}`}>
-              <span style={{ color: SELL }}>✕</span>
-              {t('priceHistory.legend.rsiSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.boll ? '' : 'opacity-40'}`}>
-              <span
-                className="inline-block h-2.5 w-2.5 rounded-full"
-                style={{ background: EXTRA_GROUP_STYLES.boll.buyColor }}
-              />
-              {t('priceHistory.legend.bollBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.boll ? '' : 'opacity-40'}`}>
-              <span
-                className="inline-block h-2.5 w-2.5 rounded-full"
-                style={{ background: EXTRA_GROUP_STYLES.boll.sellColor }}
-              />
-              {t('priceHistory.legend.bollSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.cci ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5" style={{ background: EXTRA_GROUP_STYLES.cci.buyColor }} />
-              {t('priceHistory.legend.cciBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.cci ? '' : 'opacity-40'}`}>
-              <span className="inline-block h-2.5 w-2.5" style={{ background: EXTRA_GROUP_STYLES.cci.sellColor }} />
-              {t('priceHistory.legend.cciSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.dmi ? '' : 'opacity-40'}`}>
-              <span style={{ color: EXTRA_GROUP_STYLES.dmi.buyColor }}>▲</span>
-              {t('priceHistory.legend.dmiBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.dmi ? '' : 'opacity-40'}`}>
-              <span style={{ color: EXTRA_GROUP_STYLES.dmi.sellColor }}>▼</span>
-              {t('priceHistory.legend.dmiSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.mfi ? '' : 'opacity-40'}`}>
-              <span style={{ color: EXTRA_GROUP_STYLES.mfi.buyColor }}>✕</span>
-              {t('priceHistory.legend.mfiBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.mfi ? '' : 'opacity-40'}`}>
-              <span style={{ color: EXTRA_GROUP_STYLES.mfi.sellColor }}>✕</span>
-              {t('priceHistory.legend.mfiSell')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.compositeBuy ? '' : 'opacity-40'}`}>
-              <span style={{ color: BUY }}>▲</span>
-              {t('priceHistory.legend.compositeBuy')}
-            </span>
-            <span className={`flex items-center gap-1.5 transition-opacity ${visibleTriggers.compositeSell ? '' : 'opacity-40'}`}>
-              <span style={{ color: SELL }}>▼</span>
-              {t('priceHistory.legend.compositeSell')}
+              {language === 'zh' ? '卖出' : 'Sell'}
             </span>
             {SMA_DOTTED.map(({ key, color }) => (
               <span key={`sma-legend-${key}`} className="flex items-center gap-1.5">
@@ -2639,6 +2141,18 @@ export const StockIndicatorChart: React.FC<StockIndicatorChartProps> = ({ stockC
         </>
       )}
       </div>
+      </details>
+      {autoTuneResult ? (
+        <div className="order-4 mb-4 rounded-xl border border-border/60 bg-background/40 p-3">
+          <AutoTuneStrategyView
+            report={autoTuneResult}
+            language={language}
+            selectedFamily={selectedTriggerStrategy}
+            selectedStrategyKey={selectedStrategyKey}
+            days={days}
+          />
+        </div>
+      ) : null}
     </Card>
   );
 };

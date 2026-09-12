@@ -81,8 +81,8 @@ export function AutoTuneAllocationPanel({ report, language, onApplyThresholds }:
           <tbody>{report.policies.map(policy => <tr key={policy.name} className="border-t border-border/40">
             <td className="p-2"><button type="button" className="text-primary underline" onClick={() => setInspected(policy.name)}>
               {names[policy.name] ?? policy.name}{policy.name === report.selectedPolicy ? ' ✓' : ''}</button></td>
-            <td className="p-2">{policy.metrics.train.totalReturnPct.toFixed(2)}%</td>
-            <td className="p-2">{policy.metrics.validation.totalReturnPct.toFixed(2)}%</td>
+            <td className="p-2">{policy.metrics.train ? `${policy.metrics.train.totalReturnPct.toFixed(2)}%` : '—'}</td>
+            <td className="p-2">{policy.metrics.validation ? `${policy.metrics.validation.totalReturnPct.toFixed(2)}%` : '—'}</td>
             <td className="p-2">{policy.metrics.test.totalReturnPct.toFixed(2)}%</td>
             <td className="p-2">{policy.metrics.test.actualCagr === null ? text('未成熟', 'Immature') : `${((policy.metrics.test.actualCagr ?? policy.metrics.test.cagrPct / 100) * 100).toFixed(2)}%`}</td>
             <td className="p-2">{policy.metrics.test.sharpe.toFixed(2)}</td>

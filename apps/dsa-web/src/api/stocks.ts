@@ -212,6 +212,10 @@ export interface AutoTuneValidationFold {
 }
 
 export interface AutoTuneDecision {
+  executionPrice?: number;
+  holdingPct?: number;
+  tradeNavPct?: number;
+  score?: number | null;
   signalDate: string;
   date: string;
   side: 'buy' | 'sell';
@@ -463,14 +467,14 @@ export interface AllocationReport {
   policies: {
     name: string;
     thresholds?: { buy: number; sell: number };
-    metrics: Record<'train' | 'validation' | 'test', AllocationMetrics>;
+    metrics: { train: AllocationMetrics | null; validation: AllocationMetrics | null; test: AllocationMetrics };
     transitions: AllocationTransition[];
     economicCurve?: { date: string; strategyNav: number; requiredNav: number; benchmarkNav: number | null; cagrDeficit: number; buyHoldNav?: number; cashNav?: number }[];
     scoreObservations?: { date: string; buyScore: number; sellScore: number; buyThreshold: number;
       sellThreshold: number; missedBuyRegret: number; missedSellRegret: number; opportunityReason: string;
       assetForwardReturn?: number }[];
     testEquity: AutoTuneEquitySeries;
-    executions: { date: string; reason: string; side: string; tradeValue: number; transactionCost: number; nav: number }[];
+    executions: { executionPrice?: number; holdingPct?: number; tradeNavPct?: number; score?: number | null; date: string; reason: string; side: string; tradeValue: number; transactionCost: number; nav: number }[];
   }[];
   uniqueStatesVisited: number;
   config: { policyMode: string; simplicityTolerance: number; q: Record<string, number>; state: Record<string, unknown> };
@@ -479,11 +483,16 @@ export interface AllocationReport {
 }
 
 export interface ACESReport extends Omit<AllocationReport, 'config'> {
+  simulationStatus?: 'COMPLETED' | 'UNAVAILABLE';
+  simulationMode?: 'TUNED' | 'PRESET';
+  researchStatus?: 'ACCEPTED' | 'NOT_ACCEPTED' | 'UNAVAILABLE';
+  warnings?: string[];
   strategyKey: 'G'; version: number; error?: string;
   config: Record<string, unknown>;
   readiness: { status: 'PASS' | 'WARN' | 'FAIL'; checks: Record<string, boolean> };
   selectedThresholds?: { buy: number; sell: number };
   inspectedOnly?: boolean;
+  inspectedPolicy?: string;
   candidates?: unknown[];
   robustness?: { candidate: { policy: string; thresholds: number[] }; scenarios: {
     scenario: string; passed: boolean; folds: { metrics: AllocationMetrics; failures: string[] }[];
@@ -496,6 +505,7 @@ export interface ACESReport extends Omit<AllocationReport, 'config'> {
 }
 
 export interface AutoTuneResponse {
+  testPrices?: AutoTuneEquitySeries;
   aces?: ACESReport | null;
   allocation?: AllocationReport | null;
   methodologyVersion?: number | null;

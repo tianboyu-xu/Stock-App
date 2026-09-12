@@ -50,6 +50,22 @@ def test_cooldown_and_protective_exits():
     assert any(e["reason"] == "stop" for e in protected["executions"])
 
 
+def test_chart_marks_include_partial_fills_and_protective_exits():
+    sim = run()
+    first, second = sim["executions"][:2]
+    assert first["score"] == 2
+    assert first["execution_price"] == 100
+    assert first["holding_pct"] == pytest.approx(60)
+    assert second["holding_pct"] == pytest.approx(80)
+    assert second["trade_nav_pct"] == pytest.approx(20)
+    protected = run(prices=[100., 100., 80., 80., 100., 100., 100., 100., 100.], gap=5,
+                    stop_multiple_atr=1)
+    stop = next(e for e in protected["executions"] if e["reason"] == "stop")
+    assert stop["execution_price"] == 80
+    assert stop["holding_pct"] == 0
+    assert stop["score"] is None  # A protective exit is not a scored SELL trigger.
+
+
 def test_identical_technical_triggers_under_different_policies():
     current = run(CurrentAllocationPolicy([.6] * 9, 0))
     fixed = run()

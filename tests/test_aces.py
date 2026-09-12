@@ -7,7 +7,7 @@ import math
 import pytest
 
 from src.services.aces.config import ACESConfig
-from src.services.aces.optimizer import ACESStudy
+from src.services.aces.optimizer import ACESStudy, preset_backtest
 from src.services.aces.runtime import ACESRuntime, ACESState, ACESStateEncoder, prepare_context, validate_bars
 from src.services.allocation.economic_reward import BenchmarkSeries
 from src.services.allocation.fixed_score_policy import FixedScorePolicy
@@ -27,6 +27,30 @@ def fixture(n=650):
                   sell_score=[8 if i % 20 == 15 else 0 for i in range(n)], buy_allocation=[.6] * n)
     benchmark = BenchmarkSeries({d: 100 * 1.0001 ** i for i, d in enumerate(dates)}, adjusted=True)
     return base, scores, benchmark
+
+
+def test_preset_backtest_keeps_losing_trades_and_missing_benchmark_results():
+    base, scores, _ = fixture()
+    scores["buy_score"] = [0] * 650
+    scores["sell_score"] = [0] * 650
+    scores["buy_score"][500] = 8
+    scores["sell_score"][530] = 8
+    for i in range(500, 650):
+        price = 100 - (i - 500) * .2
+        for key in ("open", "close"):
+            base[key][i] = price
+        base["low"][i], base["high"][i] = price - .1, price + .1
+    c = config(risk={"volatility_control": False})
+    report = preset_backtest(base, scores, (500, 649), c, None, reason="Insufficient research history")
+    row = report["policies"][0]
+    assert report["simulation_status"] == "COMPLETED"
+    assert report["research_status"] == "UNAVAILABLE"
+    assert report["readiness"]["status"] == "WARN"
+    assert row["metrics"]["test"]["total_return_pct"] < 0
+    assert row["metrics"]["test"]["final_nav"] < 1
+    assert [e["side"] for e in row["executions"]] == ["BUY", "SELL"]
+    assert all(p["benchmark_nav"] is None for p in row["economic_curve"])
+    assert c.allocation.economic.benchmark_missing_policy == "BLOCK"  # Request not mutated.
 
 
 def config(**kwargs):
@@ -159,8 +183,8 @@ def test_staged_search_purge_stress_and_frozen_test():
     assert study.selected == selected_before
     assert [dict(s.policies["Q_LEARNING"].table) for pair in study.q_pairs for s in study.studies[pair]] == q_before
     assert report["strategy_key"] == "G"
-    if report["selected_policy"] is None:
-        assert report["test_risk_status"] == "NOT_SELECTED"
+    assert report["simulation_status"] == "COMPLETED"
+    assert report["test_risk_status"] in {"PASSED", "BREACH", "FAILED_CHECKS"}
     assert report["search_complexity"]["q_regions"] == 1
     assert len({id(s.policies["Q_LEARNING"].table) for pair in study.q_pairs for s in study.studies[pair]}) == 2
     assert not report["live_enabled"]

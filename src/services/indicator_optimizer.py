@@ -1114,10 +1114,12 @@ def run_auto_tune(
 
     allocation_study = fit_allocation(ranges["train"])
     aces_study, aces_report, aces_test = None, None, ranges["test"]
+    aces_preset_reason = None
     if aces_config is not None:
         from datetime import datetime, timezone, timedelta
         from src.services.aces.config import ACESConfig
-        from src.services.aces.optimizer import ACESStudy
+        from src.services.aces.optimizer import ACESStudy, ACESResearchUnavailable, preset_backtest
+        from src.services.allocation.economic_reward import BenchmarkDataMissing
         from src.services.aces.runtime import validate_bars
         aces_settings = ACESConfig.from_dict(aces_config)
         if aces_settings.enabled:
@@ -1133,13 +1135,27 @@ def run_auto_tune(
                 aces_base = prepare_base_series(confirmed)
                 aces_scores = compute_composite_signals(aces_base, DEFAULT_THRESHOLDS)
                 aces_test = (ranges["test"][0], len(confirmed) - 1)
-                aces_validation = (ranges["validation"][0], ranges["validation"][1] - aces_settings.purge_bars)
-                aces_study = ACESStudy(aces_base, aces_scores, ranges["train"],
+                # Reserve a complete validation block BEFORE the final purge. The
+                # legacy validation block can be shorter than the purge itself.
+                # Move the development boundary only; never touch final-test bars.
+                validation_end = ranges["test"][0] - aces_settings.purge_bars - 1
+                validation_bars = max(ranges["validation"][1] - ranges["validation"][0] + 1,
+                                      aces_settings.allocation.validation_folds
+                                      * aces_settings.risk.minimum_validation_samples)
+                validation_start = validation_end - validation_bars + 1
+                aces_validation = (validation_start, validation_end)
+                aces_train = (ranges["train"][0], min(ranges["train"][1], validation_start - 1))
+                aces_study = ACESStudy(aces_base, aces_scores, aces_train,
                                        aces_validation, aces_settings, allocation_benchmark,
                                        metadata={**(aces_metadata or {}), "feature_config": dict(DEFAULT_THRESHOLDS),
                                                  "excluded_preview_dates": excluded})
+            except (ACESResearchUnavailable, BenchmarkDataMissing) as error:
+                # Freeze the preset choice now; only execute the held-out period
+                # in the reporting phase below, after all development selection.
+                aces_preset_reason = str(error)
             except ValueError as error:
                 aces_report = {"strategy_key": "G", "name": "ACES", "version": aces_settings.version,
+                               "simulation_status": "UNAVAILABLE",
                                "readiness": {"status": "FAIL", "checks": {}}, "error": str(error),
                                "live_enabled": False, "config": aces_settings.to_dict()}
     fine_allocation_study = None
@@ -1288,14 +1304,29 @@ def run_auto_tune(
     if aces_study:
         try:
             aces_report = aces_study.report(aces_test)
+        except (ACESResearchUnavailable, BenchmarkDataMissing) as error:
+            aces_preset_reason = str(error)
         except ValueError as error:
             aces_report = {"strategy_key": "G", "name": "ACES", "version": aces_study.config.version,
+                           "simulation_status": "UNAVAILABLE",
                            "readiness": {"status": "FAIL", "checks": {}}, "error": str(error),
                            "live_enabled": False, "config": aces_study.config.to_dict()}
+    if aces_preset_reason is not None:
+        try:
+            aces_report = preset_backtest(aces_base, aces_scores, aces_test, aces_settings,
+                                         allocation_benchmark, reason=aces_preset_reason,
+                                         metadata={**(aces_metadata or {}), "excluded_preview_dates": excluded})
+        except ValueError as error:
+            aces_report = {"strategy_key": "G", "version": aces_settings.version,
+                           "simulation_status": "UNAVAILABLE", "error": str(error),
+                           "readiness": {"status": "FAIL", "checks": {}},
+                           "live_enabled": False, "config": aces_settings.to_dict()}
 
     return {
         "methodology_version": METHODOLOGY_VERSION,
         "aces": aces_report,
+        "test_prices": {"dates": dates[ranges["test"][0]:ranges["test"][1] + 1],
+                        "values": base["close"][ranges["test"][0]:ranges["test"][1] + 1]},
         "allocation": {"technical_strategy_key": "A", **allocation_study.report(ranges["test"])},
         "window_days": window_days,
         "walk_forward": {

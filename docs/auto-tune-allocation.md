@@ -12,15 +12,77 @@ loop. Reusing validation-selected A–F feature parameters in earlier allocation
 folds would contaminate those folds. A–F metrics, recommendations and curves remain
 a separate legacy Current-allocation reference.
 
-The joint panel has its own selected thresholds and apply button. Applying them
-restores the default composite score parameters and applies the selected BUY/SELL
-thresholds; it does not install a live allocation policy or place orders.
+The main screen groups the study into the five-toggle combined view below. Toggling
+a choice shows or hides its historical test executions and NAV line immediately,
+without applying
+thresholds to live indicators or placing orders. Detailed research is collapsed.
 Fine Tune runs the joint study for its development-selected training window.
 Final-test results cannot change that window or any learned configuration.
 
 中文：联合优化买卖触发阈值与资金配置；使用预先固定的默认复合评分，复用缓存，不在此循环中调指标或因子权重。
-避免将验证集选出的 A–F 参数带回早期折。A–F 表与原推荐仍单独保留；新面板有独立应用阈值按钮，
-恢复默认评分参数后应用联合阈值，不部署实盘配置、不下单。Fine Tune 使用开发阶段选中的训练窗口。
+避免将验证集选出的 A–F 参数带回早期折。主界面合并为以下五种选择，切换即更新历史测试图，
+不部署实盘配置、不下单。A–F 表与原推荐折叠保留。Fine Tune 使用开发阶段选中的训练窗口。
+
+## Five strategy choices / 五种策略选择
+
+| Choice / 选择 | Existing study / 对应研究 |
+| --- | --- |
+| Baseline / 基础 | A |
+| Trend / 趋势 | B, C, D; highest validation score / 按验证评分选择 |
+| Multi-factor / 多因子 | E, F; highest validation score / 按验证评分选择 |
+| Adaptive Budget / 自适应预算 | Selected joint threshold/allocation policy / 联合阈值与预算所选策略 |
+| ACES | Selected G policy, or explicitly labeled diagnostic policy / G 所选策略或明确标注的诊断策略 |
+
+Within a family, ties prefer the earlier generation; final-test results never
+choose a representative. When allocation has no eligible policy, a fixed
+Tuned Fixed (then Fixed) diagnostic fallback remains inspectable. ACES uses its
+development-selected `inspected_policy` when no candidate passes selection.
+When ACES cannot run full research, it still returns a preset backtest with
+the existing score-to-budget rules and risk limits. Missing SPY removes only
+the benchmark comparison/reward; losses and zero-trade cash results remain visible.
+See [ACES backtest availability](aces.md#backtest-availability--回测结果可用性).
+
+中文：ACES 无法完成完整研究时仍按既有评分资金规则和风险限制回测；缺少 SPY 只停用
+基准比较及相对奖励，亏损或零成交的现金结果仍显示。
+
+History and test period are the main inputs. Trade spacing, Fine Tune, presets
+and ACES configuration live under collapsed **Advanced tuning settings**;
+**Trigger thresholds** also starts collapsed. The Web includes ACES by default,
+while the API still requires `aces_config`. Old saved runs remain readable;
+rerun to populate the new execution-chart fields.
+
+Each visible choice contributes its test-period price markers and one NAV line to
+the combined chart. The price chart uses actual execution dates and fill prices,
+including partial sells, stops, risk reductions and final
+liquidation. Buy/sell direction is distinguished by marker color and shape only
+(green ▲ / orange ▼), with no BUY/SELL text. Each marker shows trade budget as a percentage of **pre-fill NAV**,
+holdings as a percentage of **post-fill NAV**, and the originating signal score
+in `trade% / S score (Hold%)` format.
+Protective and terminal exits have no signal score and display `—`. These new
+fields do not change the existing ledger's initial-budget cash-flow percentages.
+The API adds optional `test_prices`, `execution_price`, `holding_pct`,
+`trade_nav_pct`, and `score` fields; existing consumers remain compatible.
+
+Blocked/HOLD triggers are optionally shown as hollow markers with zero executed
+budget and their reason. They are not trades. Selecting/focusing a marker exposes
+its details; last-63/252-session views help with dense charts. The combined NAV chart uses
+the full test period, starts from normalized capital 1, includes execution fees,
+and displays only the exact-date adjusted SPY benchmark when available. Missing
+benchmark data is explicit. Reward diagnostics never become fabricated fills.
+The technical indicator plot stays expanded above the trigger thresholds, and
+research tables remain collapsed below.
+
+中文：每个策略组只按验证评分选版本，同分优先较早代次，不按最终测试收益改选。
+无合格配置时，自适应预算固定回退至调优固定策略（其次固定策略）供诊断；ACES 使用
+开发阶段选定的诊断策略并标注失败。历史年限和测试年限为主要输入，其余设置及触发阈值默认折叠。
+Web 默认包含 ACES，API 仍需显式请求。旧结果可读取，重新调优后补齐新的图表字段。
+
+价格图仅展示测试期，按真实成交日期和价格标注买卖、部分减仓、止损、风险减仓及期末平仓。
+买卖方向仅用标记颜色与形状区分（绿色 ▲ / 橙色 ▼），不显示 BUY/SELL 文字。
+标记包含成交前净值占比（预算）、成交后净值占比（持仓）及触发分数，格式为 `trade% / S score (Hold%)`；保护性和期末平仓无触发分数，显示 `—`。
+旧资金表的初始资金占比口径不变。被阻止/保持仓位的触发可选显示为空心标记，成交预算为零，
+不能当作真实交易。合并净值图展示完整测试期的各可见策略实际净值、复权 SPY 和增长目标；包含费用，缺失基准时明确说明。
+奖励、机会遗憾等诊断不能伪造为成交。技术指标图默认展开并位于触发阈值上方，研究详情折叠保留。
 
 ## Architecture / 架构
 

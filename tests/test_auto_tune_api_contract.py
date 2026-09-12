@@ -66,6 +66,7 @@ def _report_payload(with_trades):
     ).report((60, 89))
     return {
         "methodology_version": 6,
+        "test_prices": {"dates": [bar["date"] for bar in bars], "values": [bar["close"] for bar in bars]},
         "allocation": allocation,
         "window_days": 90,
         "history": {"bars": 814, "start_date": "2021-01-01", "end_date": bars[-1]["date"]},
@@ -120,6 +121,7 @@ def test_auto_tune_api_roundtrip_preserves_research_diagnostics(with_trades, res
     # The stock client then runs the existing deep toCamelCase converter on these keys.
     wire = json.loads(response_model.model_validate(payload).model_dump_json(by_alias=True))
     assert wire["methodology_version"] == 6
+    assert wire["test_prices"] == payload["test_prices"]
     assert wire["allocation"] == json.loads(json.dumps(payload["allocation"]))
     assert wire["walk_forward"] == payload["walk_forward"]
     strategy = wire["strategies"][0]
@@ -151,6 +153,19 @@ def test_legacy_auto_tune_payload_does_not_gain_current_methodology(response_mod
     assert wire["methodology_version"] is None
     assert wire["strategies"][0]["test_confidence"] is None
     assert wire["fine_tune"] is None
+
+
+def test_aces_preset_results_and_null_research_metrics_survive_api(response_model):
+    from tests.test_aces import fixture, config
+    from src.services.aces.optimizer import preset_backtest
+    base, scores, _ = fixture()
+    payload = _report_payload(False)
+    payload["aces"] = preset_backtest(base, scores, (500, 649), config(), None, reason="Missing benchmark")
+    wire = json.loads(response_model.model_validate(payload).model_dump_json())
+    assert wire["aces"] == json.loads(json.dumps(payload["aces"]))
+    assert wire["aces"]["simulation_status"] == "COMPLETED"
+    assert wire["aces"]["policies"][0]["metrics"]["validation"] is None
+    assert wire["aces"]["policies"][0]["executions"]
 
 
 def test_v2_joint_thresholds_and_daily_observations_survive_schema(response_model):

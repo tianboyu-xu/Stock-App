@@ -2,12 +2,13 @@ import { useState } from 'react';
 import type { ACESReport, AllocationReport } from '../../api/stocks';
 import { AutoTuneAllocationPanel } from './AutoTuneAllocationPanel';
 
-export function ACESSetup({ onChange, language, disabled }: {
+export function ACESSetup({ onChange, language, disabled, initiallyEnabled = false }: {
+  initiallyEnabled?: boolean;
   onChange: (value: Record<string, unknown> | undefined, valid: boolean) => void;
   language: string; disabled: boolean;
 }) {
   const zh = language === 'zh';
-  const [enabled, setEnabled] = useState(false);
+  const [enabled, setEnabled] = useState(initiallyEnabled);
   const [budget, setBudget] = useState(10000);
   const [cagr, setCagr] = useState(30);
   const [exposure, setExposure] = useState(100);
@@ -71,7 +72,7 @@ export function ACESSetup({ onChange, language, disabled }: {
         <label><input type="checkbox" checked={opportunity} onChange={e => { setOpportunity(e.target.checked); update({ opportunity: e.target.checked }); }} /> {label('Opportunity cost', '机会成本')}</label>
         <span>{label('No leverage · S&P 500 · Stock Buy & Hold · 20% allocation steps', '无杠杆 · 标普500 · 个股买入持有 · 20% 仓位步长')}</span>
       </div>
-      <p className="my-2">{label('30% CAGR is a performance hurdle, not a guaranteed return. Default purge: 252 trading bars. Insufficient history blocks ACES. Presets populate settings only.', '30% CAGR 是门槛而非收益保证。默认隔离 252 个交易日；数据不足时禁止运行 ACES。预设仅填充配置。')}</p>
+      <p className="my-2">{label('30% CAGR is a performance hurdle, not a guaranteed return. Research uses a 252-bar purge. When research data is insufficient, ACES still backtests its fixed allocation rules and reports the result.', '30% CAGR 是门槛而非收益保证。研究默认隔离 252 个交易日；研究数据不足时，ACES 仍按固定资金规则回测并展示结果。')}</p>
       <details><summary>{label('Advanced settings', '高级设置')}</summary>
         <p>{label('Versioned JSON overrides for Q, reward, risk, execution and purge. Basic controls take precedence. Numeric rates use fractions [0,1]; Q episodes 1–2000, minimum visits ≥1, purge 1–1260 bars. Defaults and complete ranges: docs/aces.md.', '使用版本化 JSON 配置 Q、奖励、风险、执行及隔离期。基础控件优先。比例 [0,1]，Q 回合 1–2000，访问次数至少 1，隔离期 1–1260 日。完整默认值及范围见 docs/aces.md。')}</p>
         <textarea aria-label="ACES advanced JSON" className="w-full rounded border border-border bg-transparent p-2 font-mono" rows={6} value={advanced} onChange={e => { setAdvanced(e.target.value); update({ advanced: e.target.value }); }} />

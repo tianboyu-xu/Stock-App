@@ -1,14 +1,62 @@
 # Strategy G — ACES / 自适应资金效率策略
 
-ACES v1 is an opt-in Auto Tune research generation alongside A–F. It does not
+ACES v1 is an independent Auto Tune research generation alongside A–F. It does not
 change their feature parameters, recommendation ranking or execution rules.
-Enable **Include ACES alongside A–F** to request G; disabling it omits G's work.
+The Web Auto Tune screen includes ACES by default; disable it under **Advanced
+tuning settings** to omit G's work. API callers still opt in with `aces_config`.
 The existing allocation study remains available separately. ACES uses the shared
 default technical scoring model; it does not claim to inherit validation-tuned F
 parameters. This prevents later F selections leaking into earlier ACES folds.
 
-中文：ACES 是独立的 G 代研究策略，默认不启用。A–F 的参数、推荐和执行保持原路径。
+中文：ACES 是独立的 G 代研究策略，Web 自动调优默认包含，可在“高级调优设置”中关闭；
+API 仍需传入 `aces_config` 才会运行。A–F 的参数、推荐和执行保持原路径。
 G 复用默认评分与资金环境，不把验证选出的 F 参数带回早期训练折。
+
+The five-choice results view plots the selected ACES policy's test executions.
+If no policy passes selection, `inspected_policy` identifies the development-selected
+backtest policy to display. Its trades, losses and NAV remain visible independently
+of research acceptance; test profitability never chooses a replacement. Low-sample fallback and
+blocked/HOLD reasons appear on price-chart markers. Missing research history or
+benchmark data uses the preset path below. See [the five-choice view](auto-tune-allocation.md).
+
+中文：五选一结果视图展示 ACES 所选策略的测试期成交。如果没有策略通过筛选，
+`inspected_policy` 指明开发阶段选定的回测策略；独立展示交易、盈亏和净值，
+不按测试收益改选。低样本回退与被阻止/保持仓位的原因可在价格图标记中查看。
+研究历史或基准不足时仍按以下预设规则回测；价格无效时说明无法模拟的原因。
+
+## Backtest availability / 回测结果可用性
+
+Simulation and research acceptance are separate. `simulation_status=COMPLETED`
+means trades, test metrics and NAV were calculated, even for a loss or rejected
+candidate. `research_status` is `ACCEPTED`, `NOT_ACCEPTED`, or `UNAVAILABLE`.
+Completed runs use readiness PASS/WARN; FAIL is reserved for unavailable simulation.
+Research selection remains nullable and never authorizes live trading.
+
+If full research cannot run because of purge/sample requirements, missing adjusted
+SPY, or incomplete stock sessions, Auto Tune runs `simulation_mode=PRESET`:
+
+- Freeze the configured BUY/SELL thresholds nearest +6/−6 before test execution.
+- Use the existing FixedScorePolicy (BUY targets 60/80/100%, SELL targets 40/20/0%)
+  with the same ACES volatility/exposure limits, fees, stops, spacing and cash accounting.
+- Do not train or select parameters on test prices. Train/validation metrics are
+  `null`, not invented; requested and effective configuration are both recorded.
+- Omit SPY comparison and relative rewards if its test data is incomplete. Keep
+  stock NAV, growth target, trades and scores. Never substitute a price-only index.
+- With missing stock sessions, execute only at the next available recorded bar,
+  explicitly warning that next-session timing cannot be assumed. Do not fill gaps.
+
+The preset is an executable rule strategy, not a trained Q policy. The UI leads
+with actual return, maximum drawdown, trade count and final NAV. Research rejection
+does not erase results. Zero trades remains a valid cash result; no trades are fabricated.
+Invalid OHLC/volume, unordered dates and missing confirmed test bars remain errors.
+
+中文：模拟是否完成与研究是否通过独立记录。有效价格可回测时，即使亏损或无候选通过筛选，
+仍返回成交、收益和净值。历史不足、缺少复权 SPY 或股票交易日不完整时，改用 ACES 固定规则：
+在配置网格中选最接近 +6/−6 的阈值，按 60/80/100% 买入目标和 40/20/0% 卖出目标执行，
+继续遵守原波动率/仓位限制、费用、止损、交易间隔和现金约束。不会用测试价格训练或改选，
+训练/验证指标明确为 null，并记录请求配置、实际配置和原因。缺少 SPY 只停用基准比较与相对奖励；
+股票缺交易日时只在下一根已有价格 bar 成交，不补造价格，并说明时点限制。固定规则不冒充 Q 学习。
+零成交仍返回现金净值；无效价格、乱序日期或缺少已确认测试数据才无法模拟。
 
 ## Logic and dependency flow / 逻辑与依赖
 
@@ -82,17 +130,27 @@ deficit remain separate. See [V3 equations](auto-tune-allocation.md#v3-time-valu
 
 Train endpoints are trimmed by `purge_bars` before each validation fold. In the
 Auto Tune integration, the final `purge_bars` development bars are also excluded
-from validation, separating it from final test. Each segment starts at NAV=1 and
+from validation, separating it from final test. The complete validation block is
+moved earlier rather than shortened by that gap. It retains at least the legacy
+validation length or `validation_folds * minimum_validation_samples`, whichever
+is larger. Training ends before this block and still respects an explicitly
+clipped training endpoint. If the remaining training history is insufficient,
+ACES runs the preset backtest with a research-history note; execution risk limits stay intact.
+Each segment starts at NAV=1 and
 100% cash, and liquidates at its endpoint. Default 252 bars relates to the longest
 default daily lookback; shorter overrides weaken this protection. Small histories
-can fail the minimum-data requirement after purging.
+can fall back to the preset when they cannot support purged research.
+
+中文：最终隔离期不再从验证窗口中直接扣除，而是将完整验证窗口前移，至少保留原验证长度
+或“折数 × 每折最小样本数”两者的较大值。训练端点位于验证窗口之前，并遵守用户裁剪的
+训练结束日期。隔离后训练历史仍不足时使用固定规则回测并提示研究数据不足，不放宽执行风险限制。
 
 Plateau score is the fraction of evaluated adjacent same-policy threshold pairs
 that pass risk and remain within the configured absolute-return tolerance.
 Unavailable neighbors are unknown, not robust. Every stress fold must pass its
 hard checks and remain within tolerance of its base NAV. Readiness PASS requires
 a selected robust candidate, positive validation and final-test return, acceptable
-test risk/support and complete benchmark data. WARN/FAIL expose failed checks.
+test risk/support and complete benchmark data. WARN exposes failed research checks without hiding a completed backtest.
 These are research acceptance checks; **PASS does not enable live trading**.
 
 中文：先固定映射寻优，再在少数有希望区域独立训练 Q；验证冻结且有隔离期。
@@ -104,16 +162,18 @@ These are research acceptance checks; **PASS does not enable live trading**.
 `GET /api/v1/stocks/{ticker}/auto-tune?aces_config=<JSON>` adds optional `aces` to
 the response. Existing `strategies` and `recommended` continue to describe A–F.
 `aces_config` omitted or `enabled=false` disables G. Invalid settings return 422
-before data fetching. ACES data/purge failures return an explicit failed G result,
-preserving A–F output. Unknown config/version keys are rejected.
+before data fetching. Research data/purge limitations use the preset backtest;
+invalid price inputs return an unavailable G result, preserving A–F output.
+Unknown config/version keys are rejected.
 
-SPY comparison defaults to BLOCK on missing adjusted, exact-date data. DISABLE is
-an explicit request override and cannot yield readiness PASS. The API verifies US
+Research SPY comparison defaults to BLOCK on missing adjusted, exact-date data.
+The preset backtest explicitly records effective DISABLE for relative rewards and
+cannot yield research readiness PASS. The API verifies US
 stock adjustment basis and does not substitute an unadjusted index. Trailing bars
 dated today/future in UTC or explicitly unfinished are excluded from ACES and
 recorded as previews. Interior unfinished bars, unordered/duplicate dates or invalid
-OHLC/volume fail closed. Missing stock sessions present in the benchmark calendar
-also block execution rather than treating a later available bar as the next session.
+OHLC/volume fail closed. Missing stock sessions prevent full research; the preset
+uses next-available-bar execution with an explicit timing limitation.
 Historical requested periods are not rejected merely for being old.
 This conservative historical cutoff is not a live exchange-calendar scheduler.
 

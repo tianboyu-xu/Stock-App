@@ -17,6 +17,10 @@ from .config import ACESConfig, ACES_VERSION
 from .runtime import ACESRuntime, ACESState, ACESStateEncoder, prepare_context
 
 
+class ACESResearchUnavailable(ValueError):
+    """Valid price data can be simulated, but cannot support the requested research."""
+
+
 def risk_failures(run, bounds, config, name):
     metrics = allocation_metrics(run, bounds)
     failures = []
@@ -39,13 +43,15 @@ def require_complete_stock_sessions(base, bounds, benchmark):
     days = base["dates"][bounds[0]:bounds[1] + 1]
     expected = {day for day in benchmark.values if days[0] <= day <= days[-1]}
     if expected - set(days):
-        raise ValueError("SYSTEM_SAFE_MODE: missing stock sessions; cannot assume next regular-session execution")
+        raise ACESResearchUnavailable("missing stock sessions: fills can only use the next available bar")
 
 
 class ACESStudy:
     """No mutation of A–F parameters, Q tables, or validation/test outcomes."""
     def __init__(self, base, scores, train, validation, config=None, benchmark=None, *, metadata=None):
         self.config = config or ACESConfig()
+        if not 0 <= train[0] <= train[1] < validation[0] <= validation[1] < len(base["dates"]):
+            raise ACESResearchUnavailable("Insufficient development history for the requested purge and validation windows")
         self.base = prepare_context(base, self.config)
         self.scores, self.benchmark = scores, benchmark
         require_complete_stock_sessions(self.base, (train[0], validation[1]), benchmark)
@@ -58,7 +64,8 @@ class ACESStudy:
         self.folds = [((tr[0], min(tr[1], va[0] - self.config.purge_bars - 1)), va) for tr, va in folds]
         if any(tr[1] - tr[0] < 252 or va[1] - va[0] + 1 < self.config.risk.minimum_validation_samples
                for tr, va in self.folds):
-            raise ValueError("ACES requires sufficient training and validation after the purge gap")
+            raise ACESResearchUnavailable("ACES needs more history: retain at least 253 training bars, the configured purge gaps, "
+                             "and minimum samples in every validation fold. Increase History years or shorten Test period.")
         stage_config = replace(self.config.allocation, policy_mode="FIXED" if self.config.policy_mode == "FIXED" else "TUNED_FIXED")
         self.studies, self.candidates = {}, []
         self.mapping_evaluations = 0
@@ -124,7 +131,9 @@ class ACESStudy:
             # Bounded finalist evaluation, recorded explicitly; never use test to widen it.
             if len(self.stress_results) >= self.config.q_finalists:
                 break
-        self.inspected = self.selected or max(self.candidates, key=lambda r: (not bool(r["failures"]), r["score"]))
+        inspection_pool = [r for r in self.candidates if self.config.policy_mode == "COMPARE"
+                           or r["policy"] == self.config.policy_mode]
+        self.inspected = self.selected or max(inspection_pool, key=lambda r: (not bool(r["failures"]), r["score"]))
 
     @staticmethod
     def execution_args(config):
@@ -258,13 +267,14 @@ class ACESStudy:
                 days = (date.fromisoformat(point["date"]) - date.fromisoformat(self.base["dates"][test[0]])).days
                 point["cash_nav"] = (1 + self.config.execution.cash_yield) ** (days / 365.25)
         selected = next((r for r in rows if self.selected and r["name"] == self.selected["policy"]), None)
+        evaluated = selected or next(r for r in rows if r["name"] == self.inspected["policy"])
         checks = dict(validation_selected=self.selected is not None,
-                      positive_validation=bool(self.selected and self.selected["median_return"] > 0),
-                      final_test_risk=bool(selected and not selected["test_failures"]),
-                      positive_final_test=bool(selected and selected["metrics"]["test"]["total_return_pct"] > 0),
+                      positive_validation=self.inspected["median_return"] > 0,
+                      final_test_risk=not evaluated["test_failures"],
+                      positive_final_test=evaluated["metrics"]["test"]["total_return_pct"] > 0,
                       benchmark=all(row["metrics"]["test"]["benchmark_status"] == "AVAILABLE" for row in rows),
                       purged=True, frozen=True, stress=bool(self.selected))
-        status = "PASS" if all(checks.values()) else "FAIL" if not checks["validation_selected"] or not checks["final_test_risk"] else "WARN"
+        status = "PASS" if all(checks.values()) else "WARN"
         config = self.config.to_dict()
         q_study = report_studies.get("Q_LEARNING")
         try:
@@ -279,12 +289,15 @@ class ACESStudy:
             for path in sorted(folder.glob("*.py")):
                 source_hashes[f"{folder.name}/{path.name}"] = hashlib.sha256(path.read_bytes()).hexdigest()
         return dict(strategy_key="G", name="ACES — Adaptive Capital Efficiency Strategy", version=ACES_VERSION,
+                    simulation_status="COMPLETED", simulation_mode="TUNED",
+                    research_status="ACCEPTED" if all(checks.values()) else "NOT_ACCEPTED",
                     selected_policy=self.selected["policy"] if self.selected else None,
+                    inspected_policy=self.inspected["policy"],
                     selection_basis="purged_walk_forward_then_stress", selection_status="SELECTED" if self.selected else "NO_RISK_ELIGIBLE_CANDIDATE",
                     config=config, policies=rows, selected_thresholds=dict(buy=pair[0], sell=pair[1]),
                     inspected_only=self.selected is None, readiness=dict(status=status, checks=checks),
-                    test_risk_status=("NOT_SELECTED" if selected is None else "BREACH" if selected["metrics"]["test"]["risk_rejected"]
-                                      else "FAILED_CHECKS" if selected["test_failures"] else "PASSED"),
+                    test_risk_status=("BREACH" if evaluated["metrics"]["test"]["risk_rejected"]
+                                      else "FAILED_CHECKS" if evaluated["test_failures"] else "PASSED"),
                     benchmark_status=rows[0]["metrics"]["test"]["benchmark_status"],
                     q_table=[r for r in q_study.policies["Q_LEARNING"].explain() if r["valid_at_bucket"]] if q_study else [],
                     unique_states_visited=len({key[0] for key in q_study.policies["Q_LEARNING"].table}) if q_study else 0,
@@ -301,6 +314,60 @@ class ACESStudy:
                                     benchmark_data_hash=hashlib.sha256(json.dumps(dict(self.benchmark.values), sort_keys=True).encode()).hexdigest() if self.benchmark else None,
                                     data_hash=hashlib.sha256(json.dumps({k: self.base[k] for k in ("dates", "open", "high", "low", "close", "volume")}, sort_keys=True).encode()).hexdigest()),
                     live_enabled=False, live_status="SYSTEM_SAFE_MODE: research policy is not installed for live trading")
+
+
+def preset_backtest(base, scores, test, config, benchmark, *, reason, metadata=None):
+    """Run predeclared ACES rules when research is unavailable, without fitting on test.
+
+    The same ACES encoder, risk limits, portfolio accounting and execution path
+    apply. Missing SPY disables only relative rewards/comparison, never price
+    simulation. Absent sessions are not manufactured: fills use available bars.
+    """
+    from src.services.allocation.fixed_score_policy import FixedScorePolicy
+
+    if not 0 <= test[0] < test[1] < len(base["dates"]):
+        raise ValueError("ACES needs at least two confirmed test bars to simulate")
+    requested_config = config.to_dict()
+    warnings = [reason]
+    if benchmark is None or not benchmark.covers(base["dates"][test[0]:test[1] + 1]):
+        benchmark = None
+        warnings.append("Adjusted SPY is unavailable: stock NAV and growth target are shown without benchmark reward")
+    config = replace(config, allocation=replace(config.allocation, economic=replace(
+        config.allocation.economic, benchmark_missing_policy="DISABLE")))
+    context = prepare_context(base, config)
+    # Closest configured thresholds to the declared baseline, not the most
+    # profitable test thresholds. Fixed mapping remains 60/80/100% and 40/20/0%.
+    buy = min(config.buy_thresholds, key=lambda v: (abs(v - 6), v))
+    sell = min(config.sell_thresholds, key=lambda v: (abs(v + 6), v))
+    signals = threshold_signals(context, scores, buy, sell)
+    policy = FixedScorePolicy()
+    run = simulate_allocation(context, signals, *test, policy, phase="TEST",
+                              encoder=ACESStateEncoder(config, context), runtime=ACESRuntime(config, context),
+                              benchmark=benchmark, economic_config=config.allocation.economic,
+                              lambda_opportunity=config.allocation.lambda_opportunity,
+                              opportunity_band=config.allocation.opportunity_band,
+                              **ACESStudy.execution_args(config))
+    metrics = allocation_metrics(run, test)
+    metrics["final_budget"] = config.initial_budget * metrics["final_nav"]
+    failures = risk_failures(run, test, config, "FIXED")
+    row = dict(name="FIXED", thresholds=dict(buy=buy, sell=sell), fitted_targets=list(policy.targets),
+               metrics=dict(train=None, validation=None, test=metrics),
+               transitions=run["transitions"], executions=run["executions"],
+               economic_curve=run["economic_curve"], score_observations=run["score_observations"],
+               test_equity=dict(dates=context["dates"][test[0]:test[1] + 1],
+                                values=[(v - 1) * 100 for v in run["equity"]]), test_failures=failures)
+    return dict(strategy_key="G", version=ACES_VERSION, simulation_status="COMPLETED",
+                simulation_mode="PRESET", research_status="UNAVAILABLE", warnings=warnings,
+                selected_policy=None, inspected_policy="FIXED", inspected_only=True,
+                selected_thresholds=dict(buy=buy, sell=sell), selection_status="PRESET_BACKTEST",
+                selection_basis="predeclared_rules_no_fitting", policies=[row],
+                readiness=dict(status="WARN", checks=dict(research=False, frozen=True,
+                               benchmark=benchmark is not None, final_test_risk=not failures)),
+                test_risk_status="BREACH" if metrics["risk_rejected"] else "FAILED_CHECKS" if failures else "PASSED",
+                benchmark_status=metrics["benchmark_status"], test_dates=[context["dates"][test[0]], context["dates"][test[1]]],
+                config=config.to_dict(), requested_config=requested_config, q_table=[], unique_states_visited=0,
+                folds=[], candidates=[], robustness=[], provenance=dict(metadata or {}),
+                live_enabled=False, live_status="Backtest only; no live policy installed")
 
 
 class AllocationPerturbation:

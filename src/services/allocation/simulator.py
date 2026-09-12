@@ -66,7 +66,7 @@ def simulate_allocation(base, signals, start, end, policy, *, cost_pct_per_side,
         if trace:
             records.append(previous)
 
-    def execute(target, price, i, reason):
+    def execute(target, price, i, reason, score=None):
         nonlocal last_trade, last_buy, entry_index, constrained
         if runtime:
             env.transaction_cost = runtime.cost(max(start, i - 1))
@@ -94,7 +94,10 @@ def simulate_allocation(base, signals, start, end, policy, *, cost_pct_per_side,
         if trace:
             executions.append(dict(date=base["dates"][i], reason=reason,
                                    side=result.side, trade_value=result.trade_value,
-                                   transaction_cost=result.transaction_cost, nav=result.after.nav))
+                                   transaction_cost=result.transaction_cost, nav=result.after.nav,
+                                   execution_price=price, score=score,
+                                   holding_pct=result.after.current_exposure * 100,
+                                   trade_nav_pct=abs(result.trade_value) / result.before.nav * 100))
         return result
 
     def blocked(event, target, at_open, i):
@@ -219,7 +222,7 @@ def simulate_allocation(base, signals, start, end, policy, *, cost_pct_per_side,
             if reason is not None:
                 result = env.rebalance(at_open.current_exposure, base["open"][i])
             else:
-                result = execute(target, base["open"][i], i, "signal")
+                result = execute(target, base["open"][i], i, "signal", event.score)
             record.execution = result
             record.execution_date = base["dates"][i]
             record.execution_reason = reason or result.reason

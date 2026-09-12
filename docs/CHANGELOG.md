@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+
+- [修复] Auto Tune 完整结果改用 IndexedDB 按股票保存，避免 localStorage 容量不足时静默恢复旧结果并丢失 SPY 曲线；增加保存失败提示与切股回归验证。
+- [改进] Auto Tune 结果、图表选择和时间范围按股票独立持久化；新运行仅覆盖当前股票的缓存。
+- [修复] 切换股票后恢复旧版 Auto Tune 缓存时，即使所选策略族在旧结果中不存在，仍回退展示可用历史曲线；旧结果继续保持只读限制。
+- [修复] 恢复历史 Auto Tune 缓存时统一转换 snake_case 字段，保留方法版本判断及 Adaptive Budget / NAV 的复权 SPY 曲线。
+- [改进] 技术指标价格图合并历史买卖标记；策略触发改用五种策略下拉选择，Adaptive Budget 图表共享主图时间范围和选择，触发标记统一为 Trade%、Score（持仓%）且缩小字号、不再使用字母前缀。
+- [改进] Auto Tune 结果图与技术指标价格图按所选策略联动：主图展示该策略的历史买卖，Adaptive Budget / NAV 与主图共用时间范围；触发标记按 Trade%、Score（持仓%）显示并移除字母前缀。
+- [修复] ACES 将回测完成状态与研究验收分离；历史、隔离期或复权基准不足时按固定资金规则返回盈亏、成交和净值，未通过研究检查不再隐藏结果，保留现金与执行风险约束。
+- [改进] Auto Tune 合并为基础、趋势、多因子、自适应预算和 ACES 五种选择；切换更新技术指标价格图及唯一 NAV / 标普500 / 增长目标图，标记成交预算、持仓比例和分数，触发阈值与高级设置默认折叠。
+- [修复] ACES 在最终隔离期前保留完整验证窗口，避免默认隔离期耗尽验证样本；Web 默认包含 ACES，未通过筛选时明确展示诊断策略和失败原因，保留原风险检查。
 - [新功能] 新增独立 Strategy G — ACES 研究策略：七维资金状态、波动率风险限额、现金收益、隔离期滚动验证和执行压力测试；保留 A–F，提供可选基础设置与研究就绪检查，默认不接入实盘。
 - [改进] Auto Tune v6 加入默认 30% 日历 CAGR 目标、复权 SPY 相对奖励和增量缺口惩罚；展示三条 NAV 曲线，硬回撤违规禁止应用，缺失基准明确标记。
 

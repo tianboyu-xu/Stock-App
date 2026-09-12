@@ -113,6 +113,24 @@ def test_budget_cash_position_and_weighted_profit():
     assert metrics["after_tax_total_return_pct"] == 6.5
 
 
+def test_chart_execution_fields_use_fill_nav_and_signal_score():
+    base = prepare_base_series(_make_bars([10, 10, 12, 12, 12, 12]))
+    signals = _manual_signals(6, buys=(0, 1), sells=(2,))
+    signals.update(buy_allocation=[.5] * 6, buy_score=[7] * 6, sell_score=[-6] * 6)
+    sim = simulate_trades(base, signals, 0, 5, window_days=1, cost_pct_per_side=.1, size_by_score=True)
+    buy, blocked, sell = sim["decisions"]
+    assert buy["execution_price"] == 10
+    assert buy["score"] == 7
+    assert buy["trade_nav_pct"] == pytest.approx(50 / 1.001)
+    assert 49 < buy["holding_pct"] < 50
+    assert blocked["status"] == "skipped"
+    assert "execution_price" not in blocked
+    assert sell["execution_price"] == 12
+    assert sell["holding_pct"] == 0
+    assert sell["score"] == -6
+    assert sell["trade_nav_pct"] > 50  # Appreciated stock is over half of current NAV.
+
+
 def test_exhausted_budget_blocks_buy_and_sale_replenishes_cash():
     base = prepare_base_series(_flat_bars(9))
     signals = _manual_signals(9, buys=(0, 2, 6), sells=(4,))

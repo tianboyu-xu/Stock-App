@@ -1,9 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneResponse } from '../../../api/stocks';
+import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneResponse, type AllocationMetrics, type AllocationTransition } from '../../../api/stocks';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
 import { UI_LANGUAGE_STORAGE_KEY } from '../../../utils/uiLanguage';
 import { StockIndicatorChart } from '../StockIndicatorChart';
+import { strategyPresentation } from '../autoTunePresentation';
+import { clearAutoTuneSessionCache, peekAutoTuneState } from '../../../utils/autoTuneStorage';
 
 vi.mock('../../../api/stocks', async () => {
   const actual = await vi.importActual<typeof import('../../../api/stocks')>('../../../api/stocks');
@@ -293,30 +295,160 @@ async function runAutoTuneAndGetPlot() {
   const tuneButton = await screen.findByRole('button', { name: 'Auto Tune' });
   fireEvent.click(tuneButton);
   await screen.findAllByText('基线 A');
-  const plot = screen.getByRole('img', { name: '测试段累计收益对比（%）' });
+  const plot = screen.getByTestId('strategy-nav-chart');
   return plot;
 }
 
 describe('StockIndicatorChart auto tune panel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearAutoTuneSessionCache();
     window.localStorage.clear();
     window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'zh');
     vi.mocked(stocksApi.getIndicators).mockResolvedValue(buildIndicatorResponse());
     vi.mocked(stocksApi.autoTune).mockResolvedValue(buildAutoTuneResponse());
   });
 
-  it('renders strategy rows and legend final values after running auto tune', async () => {
+  it('shows the five strategy options and shares selection and range with the NAV chart', async () => {
     renderChart();
     await runAutoTuneAndGetPlot();
 
-    expect(screen.getByText('+8.8%')).toBeInTheDocument();
-    expect(screen.getByText('+12.4%')).toBeInTheDocument();
-    expect(screen.getByText('+5.0%')).toBeInTheDocument();
+    const strategySelect = screen.getByTestId('trigger-strategy-select') as HTMLSelectElement;
+    expect(strategySelect.options).toHaveLength(5);
+    expect(strategySelect).toHaveValue('baseline');
+    expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
+    expect(screen.getByTestId('strategy-combined-chart')).toBeInTheDocument();
+    expect(screen.getByText('研究详情与参数').closest('details')).not.toHaveAttribute('open');
     expect(screen.getAllByText('个股买入持有').length).toBeGreaterThan(0);
+
+    fireEvent.change(strategySelect, { target: { value: 'budget' } });
+    expect(strategySelect).toHaveValue('budget');
+    expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('自适应预算');
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem('dsa.autotune.600519')!).selectedTriggerStrategy).toBe('budget'));
+    fireEvent.click(screen.getByRole('button', { name: '7天' }));
+    await waitFor(() => expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('7 根'));
+    expect(JSON.parse(window.localStorage.getItem('dsa.autotune.600519')!).days).toBe(7);
 
     const lastCall = vi.mocked(stocksApi.autoTune).mock.calls.at(-1);
     expect(lastCall?.[0]).toBe('600519');
+    expect(lastCall?.[1]?.acesConfig).toEqual({ version: 1, enabled: true, allocation: { economic: { allowed_max_drawdown: .15 } } });
+  });
+
+  it('keeps the new report after switching stocks when localStorage rejects the save', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const metrics: AllocationMetrics = { ...segmentMetrics, targetCagr: .3, initialNav: 1, finalNav: 1.4,
+      tradeCount: 1, turnover: 1, averageExposurePct: 100, transactionCost: 0, allocationDecisions: 1,
+      budgetConstrainedDecisions: 0, lowSampleFallbacks: 0, fallbackPct: 0 };
+    response.allocation = { selectedPolicy: 'FIXED', selectionBasis: 'validation', uniqueStatesVisited: 1,
+      qTable: [], config: { policyMode: 'FIXED', simplicityTolerance: 0, q: {}, state: {} },
+      policies: [{ name: 'FIXED', transitions: [], executions: [],
+        metrics: { train: metrics, validation: metrics, test: metrics },
+        testEquity: response.strategies[0].testEquity!,
+        economicCurve: equityDates.map((date, i) => ({ date, strategyNav: 1 + i / 10,
+          benchmarkNav: 1 + i / 20, requiredNav: 1 + i / 15, cagrDeficit: 0 })),
+      }] };
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    const old = { result: { ...buildAutoTuneResponse(), methodologyVersion: 1 },
+      selectedStrategyKey: null, settings: { transactionWindow: 90, autoTuneYears: 10,
+        autoTuneTestYears: 3, trainRangePct: null, fineTuneEnabled: false, fineTuneDays: 360 } };
+    window.localStorage.setItem('dsa.autotune.600519', JSON.stringify(old));
+    const chart = (code: string) => <UiLanguageProvider><StockIndicatorChart stockCode={code} /></UiLanguageProvider>;
+    const rendered = render(chart('600519'));
+    await screen.findByRole('alert');
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Quota exceeded', 'QuotaExceededError');
+    });
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Auto Tune' }));
+      await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+      const saved = peekAutoTuneState<{ result: AutoTuneResponse }>('dsa.autotune.600519');
+      expect(saved?.result).toEqual(response);
+      fireEvent.change(screen.getByTestId('trigger-strategy-select'), { target: { value: 'budget' } });
+      rendered.rerender(chart('AAPL'));
+      await waitFor(() => expect(screen.queryByTestId('strategy-nav-chart')).not.toBeInTheDocument());
+      rendered.rerender(chart('600519'));
+      await screen.findByTestId('strategy-nav-chart');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByTestId('trigger-strategy-select')).toHaveValue('budget');
+      expect(strategyPresentation(peekAutoTuneState<{ result: AutoTuneResponse }>('dsa.autotune.600519')!.result, 'budget')
+        .curve.map(point => point.benchmarkNav)).toEqual([1, 1.05, 1.1, 1.15, 1.2]);
+      expect(peekAutoTuneState<{ result: AutoTuneResponse }>('dsa.autotune.600519')?.result).toEqual(saved?.result);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('restores the saved auto tune result and plot state for the current stock', async () => {
+    window.localStorage.setItem('dsa.autotune.600519', JSON.stringify({
+      result: buildAutoTuneResponse(),
+      selectedStrategyKey: null,
+      selectedTriggerStrategy: 'budget',
+      days: 7,
+      settings: {
+        transactionWindow: 90,
+        autoTuneYears: 10,
+        autoTuneTestYears: 3,
+        trainRangePct: null,
+        fineTuneEnabled: false,
+        fineTuneDays: 360,
+      },
+    }));
+    renderChart();
+
+    const strategySelect = await screen.findByTestId('trigger-strategy-select') as HTMLSelectElement;
+    await waitFor(() => expect(strategySelect).toHaveValue('budget'));
+    expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('7 根');
+    expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
+  });
+
+  it('normalizes a legacy snake-case cache so methodology and SPY NAV survive a stock switch', async () => {
+    const response = buildAutoTuneResponse();
+    const policy = {
+      name: 'FIXED',
+      metrics: { train: null, validation: null, test: { ...segmentMetrics, targetCagr: .3 } },
+      transitions: [],
+      test_equity: response.strategies[0].testEquity,
+      executions: [],
+      economic_curve: equityDates.map((date, index) => ({
+        date,
+        strategy_nav: 1 + index / 10,
+        required_nav: 1 + index / 20,
+        benchmark_nav: 1 + index / 25,
+        cagr_deficit: 0,
+      })),
+    };
+    const withoutMethodologyVersion: Record<string, unknown> = { ...response };
+    delete withoutMethodologyVersion.methodologyVersion;
+    window.localStorage.setItem('dsa.autotune.600519', JSON.stringify({
+      result: {
+        ...withoutMethodologyVersion,
+        methodology_version: AUTO_TUNE_METHODOLOGY_VERSION,
+        allocation: {
+          technical_strategy_key: 'A',
+          selected_policy: 'FIXED',
+          selection_basis: 'validation',
+          policies: [policy],
+        },
+      },
+      selected_strategy_key: null,
+      selected_trigger_strategy: 'budget',
+      days: 7,
+      settings: {
+        transaction_window: 90,
+        auto_tune_years: 10,
+        auto_tune_test_years: 3,
+        train_range_pct: null,
+        fine_tune_enabled: false,
+        fine_tune_days: 360,
+      },
+    }));
+
+    renderChart();
+
+    const navChart = await screen.findByTestId('strategy-nav-chart');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(navChart).queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('shows validation scores and metrics for sweep positions, with the final test separate', async () => {
@@ -410,6 +542,8 @@ describe('StockIndicatorChart auto tune panel', () => {
     renderChart();
     await screen.findByRole('button', { name: 'Auto Tune' });
     expect(screen.getByRole('alert')).toHaveTextContent('请重新运行 Auto Tune');
+    expect(screen.getByTestId('strategy-combined-chart')).toBeInTheDocument();
+    expect(screen.getByTestId('strategy-nav-chart')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '应用选中到图表' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '保存为方案' })).toBeDisabled();
     expect(screen.queryByRole('img', { name: '各窗口位置验证评分对比' })).not.toBeInTheDocument();
@@ -518,58 +652,100 @@ describe('StockIndicatorChart auto tune panel', () => {
     expect(screen.getByTestId('test-confidence')).not.toHaveTextContent('95%');
   });
 
-  it('shows a hover tooltip with the date and per-series values', async () => {
-    renderChart();
-    const plot = await runAutoTuneAndGetPlot();
-
-    vi.spyOn(plot, 'getBoundingClientRect').mockReturnValue({
-      width: 720,
-      height: 160,
-      left: 0,
-      top: 0,
-      right: 720,
-      bottom: 160,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-
-    // width=720, left=12, plotWidth=648, refLength=5 -> clientX 360 maps to index 2.
-    fireEvent.mouseMove(plot, { clientX: 360 });
-
-    const tooltip = screen.getByText('2024-06-03').parentElement;
-    expect(tooltip).not.toBeNull();
-    expect(tooltip?.textContent).toContain('-1.0%');
-    expect(tooltip?.textContent).toContain('-2.0%');
-    expect(tooltip?.textContent).toContain('+3.0%');
-
-    fireEvent.mouseLeave(plot);
-    await waitFor(() => {
-      expect(screen.queryByText('2024-06-03')).not.toBeInTheDocument();
+  it('shows selected strategy execution markers on the technical chart', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const dates = indicatorDates;
+    response.testPrices = { dates, values: dates.map((_, i) => 100 + i) };
+    response.strategies.forEach((strategy, i) => {
+      strategy.testEquity = { dates, values: dates.map((_, index) => index + i) };
+      strategy.validationScore = i;
+      strategy.testDecisions = [
+        { signalDate: dates[0], date: dates[1], side: i ? 'sell' : 'buy',
+          status: 'executed', reason: i ? 'stop' : 'signal', suggestedBudgetPct: 50, executedBudgetPct: 50,
+          cashAfterPct: 50, holdingPct: i ? 0 : 50, tradeNavPct: 50, executionPrice: 101, score: i ? null : 7 },
+        { signalDate: dates[1], date: dates[2], side: 'buy', status: 'executed', reason: 'signal',
+          suggestedBudgetPct: 5, executedBudgetPct: 5, cashAfterPct: 45, holdingPct: 55, tradeNavPct: 5,
+          executionPrice: 102, score: 6 },
+      ];
     });
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const chart = await screen.findByRole('img', { name: 'Technical indicators' });
+    expect(within(chart).getByRole('img', { name: /2026-03-02.*BUY.*50\.0%, 7 \(50\.0%\)/ })).toBeInTheDocument();
+    expect(within(chart).getByText('50.0%, 7 (50.0%)')).toBeInTheDocument();
+    expect(within(chart).queryByRole('img', { name: /2026-03-03.*5\.0%, 6/ })).not.toBeInTheDocument();
+    expect(within(chart).queryByText('S 7')).not.toBeInTheDocument();
+
+    const strategySelect = screen.getByTestId('trigger-strategy-select');
+    fireEvent.change(strategySelect, { target: { value: 'trend' } });
+    expect(within(chart).getByRole('img', { name: /2026-03-02.*SELL.*50\.0%, — \(0\.0%\)/ })).toBeInTheDocument();
+    expect(within(chart).queryByText('50.0%, 7 (50.0%)')).not.toBeInTheDocument();
+    const before = strategyPresentation(response, 'trend');
+    response.strategies[0].testEquity!.values.fill(10000);
+    expect(strategyPresentation(response, 'trend').legacy?.key).toBe(before.legacy?.key);
+    expect(before.curve.at(-1)?.strategyNav).toBeCloseTo(1 + response.strategies[1].testEquity!.values.at(-1)! / 100);
+    expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
   });
 
-  it('renders extension trigger group legends and toggles them', async () => {
+  it('collapses thresholds and advanced inputs by default', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    expect(screen.getByText('Trigger thresholds').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('Advanced tuning settings').closest('details')).not.toHaveAttribute('open');
+  });
+
+  it.each(['TUNED', 'PRESET'] as const)('shows losing ACES results despite research rejection (%s)', async (mode) => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const dates = indicatorDates;
+    response.testPrices = { dates, values: dates.map(() => 100) };
+    const metrics: AllocationMetrics = { ...segmentMetrics, totalReturnPct: -2, targetCagr: .3, initialNav: 1, finalNav: .98,
+      tradeCount: 1, turnover: 1, averageExposurePct: 100, transactionCost: 0, allocationDecisions: 2,
+      budgetConstrainedDecisions: 1, lowSampleFallbacks: 1, fallbackPct: 50 };
+    const blocked = { triggerDate: dates[2], executionDate: dates[3], triggerDirection: 'BUY', triggerScore: 8,
+      execution: null, portfolioBefore: { lastPrice: 100, currentExposure: 1 }, executionReason: 'NO_CASH',
+      policyReason: 'LOW_SAMPLE_FALLBACK' } as AllocationTransition;
+    response.aces = { strategyKey: 'G', version: 1, selectedPolicy: null, inspectedPolicy: mode === 'PRESET' ? 'FIXED' : 'Q_LEARNING',
+      simulationMode: mode, simulationStatus: 'COMPLETED',
+      inspectedOnly: true, selectionBasis: 'validation', config: {}, liveEnabled: false,
+      readiness: { status: 'FAIL', checks: { stress: false } }, qTable: [], uniqueStatesVisited: 1,
+      policies: (mode === 'PRESET' ? ['FIXED'] : ['FIXED', 'Q_LEARNING']).map(name => ({ name,
+        metrics: { train: mode === 'PRESET' ? null : metrics, validation: mode === 'PRESET' ? null : metrics, test: metrics },
+        testEquity: { dates, values: dates.map(() => name === 'FIXED' ? 90 : -2) }, transitions: [blocked],
+        economicCurve: dates.map(date => ({ date, strategyNav: .98, benchmarkNav: 1.1, requiredNav: 1.2, cagrDeficit: .1 })),
+        executions: [{ date: dates[1], reason: 'signal', side: 'BUY', tradeValue: 1, transactionCost: 0, nav: 1,
+          executionPrice: 100, holdingPct: 100, tradeNavPct: 100, score: 7 }],
+      })) };
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    await screen.findByTestId('strategy-combined-chart');
+    const strategySelect = screen.getByTestId('trigger-strategy-select') as HTMLSelectElement;
+    fireEvent.change(strategySelect, { target: { value: 'aces' } });
+    await waitFor(() => expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('ACES'));
+    expect(await screen.findAllByText(/Backtest completed/)).not.toHaveLength(0);
+    expect(screen.queryByText(/ACES FAIL/)).not.toBeInTheDocument();
+    expect(screen.getByText('Return: -2.0%')).toBeInTheDocument();
+    expect(strategyPresentation(response, 'aces').policy?.name).toBe(mode === 'PRESET' ? 'FIXED' : 'Q_LEARNING');
+    expect(screen.getByRole('img', { name: /2026-03-02.*BUY.*100\.0%, 7 \(100\.0%\)/ })).toBeInTheDocument();
+    expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
+  });
+
+  it('replaces legacy indicator trigger toggles with the strategy select', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
     renderChart();
     await screen.findByRole('button', { name: 'Auto Tune' });
 
-    for (const label of [
-      'BOLL 买入触发',
-      'BOLL 卖出触发',
-      'CCI 买入触发',
-      'CCI 卖出触发',
-      'DMI 买入触发',
-      'DMI 卖出触发',
-      'MFI 买入触发',
-      'MFI 卖出触发',
-    ]) {
-      expect(screen.getByText(label)).toBeInTheDocument();
-    }
-
-    const bollToggle = screen.getByRole('button', { name: 'BOLL' });
-    expect(bollToggle.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(bollToggle);
-    expect(bollToggle.getAttribute('aria-pressed')).toBe('true');
+    const strategySelect = screen.getByTestId('trigger-strategy-select') as HTMLSelectElement;
+    expect(strategySelect).toBeDisabled();
+    expect(Array.from(strategySelect.options).map(option => option.textContent)).toEqual([
+      'Baseline', 'Trend', 'Multi-factor', 'Adaptive Budget', 'ACES',
+    ]);
+    expect(screen.queryByText('BOLL Buy Trigger')).not.toBeInTheDocument();
+    expect(screen.queryByText('Composite BUY Signal')).not.toBeInTheDocument();
   });
 
   it('shows extension factors in the composite breakdown with a dynamic max score', async () => {

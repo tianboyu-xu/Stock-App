@@ -1,5 +1,9 @@
 # Auto Tune 触发策略（多因子扩展）
 
+Auto Tune 完整结果（含 SPY/NAV 曲线）按股票保存在当前浏览器的 IndexedDB 中，成功的新运行覆盖该股票的结果。旧 localStorage 缓存仍可读取。若浏览器拒绝所有持久化写入，页面会提示失败；结果在当前会话切股时仍保留，但关闭或刷新页面后无法保证恢复。
+
+Full Auto Tune results, including SPY/NAV curves, are stored per stock in this browser's IndexedDB. A successful new run replaces that stock's result; legacy localStorage caches remain readable. If persistent storage fails, the page displays a warning and keeps the result for stock switching during the current session. Reloading or closing the page can then lose that unsaved result.
+
 当前方法版本为 v6：在联合阈值与配置优化中加入日历 CAGR 门槛、复权标普相对奖励和硬回撤筛选。
 目标仓位、增减仓、Q-learning、配置和验证边界见 [资金配置说明](auto-tune-allocation.md)。
 下文 v2/v3 章节保留作历史行为与兼容说明；联合优化使用默认评分模型，A–F 表仍为独立原配置参考。

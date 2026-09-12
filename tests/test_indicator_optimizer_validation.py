@@ -59,6 +59,67 @@ def test_aces_is_opt_in_and_preserves_all_legacy_generations():
     assert expanded["aces"]["policies"][0]["economic_curve"][0]["buy_hold_nav"] == 1
 
 
+def test_aces_reserves_validation_before_default_purge_without_touching_test():
+    from src.services.allocation.economic_reward import BenchmarkSeries
+    bars = _bars(1800)
+    benchmark = BenchmarkSeries({b["date"]: 100 + i * .01 for i, b in enumerate(bars)}, adjusted=True)
+    report = optimizer.run_auto_tune(
+        bars, window_days=20, test_years=1, seed=19, allocation_benchmark=benchmark,
+        allocation_config={"policy_mode": "CURRENT", "threshold_iterations": 1},
+        aces_config={"policy_mode": "FIXED", "buy_thresholds": [6], "sell_thresholds": [-6]})
+    aces = report["aces"]
+    assert "error" not in aces
+    assert aces["test_dates"][0] == report["split"]["test"]["start_date"]
+    date_indices = {bar["date"]: i for i, bar in enumerate(bars)}
+    assert len(aces["folds"]) == 3
+    for fold in aces["folds"]:
+        assert fold["purge_bars"] >= 252
+        start, end = map(date_indices.get, fold["validation_dates"])
+        assert end - start + 1 >= 40
+    validation_end = date_indices[aces["folds"][-1]["validation_dates"][1]]
+    assert date_indices[aces["test_dates"][0]] - validation_end - 1 == 252
+    assert report["test_prices"]["dates"][0] == aces["test_dates"][0]
+    assert report["test_prices"]["values"][0] == bars[date_indices[aces["test_dates"][0]]]["close"]
+
+
+@pytest.mark.parametrize("history,with_benchmark", [(1800, False), (900, True)])
+def test_aces_unavailable_research_still_returns_fixed_rule_backtest(history, with_benchmark):
+    from src.services.allocation.economic_reward import BenchmarkSeries
+    bars = _bars(history)
+    benchmark = BenchmarkSeries({b["date"]: 100 + i * .01 for i, b in enumerate(bars)}, adjusted=True) if with_benchmark else None
+    report = optimizer.run_auto_tune(
+        bars, window_days=20, test_years=1, seed=19, allocation_benchmark=benchmark,
+        allocation_config={"policy_mode": "CURRENT", "threshold_iterations": 1},
+        aces_config={"policy_mode": "FIXED", "buy_thresholds": [5, 6], "sell_thresholds": [-5, -6]})
+    aces = report["aces"]
+    assert "error" not in aces
+    assert aces["simulation_status"] == "COMPLETED"
+    assert aces["simulation_mode"] == "PRESET"
+    assert aces["research_status"] == "UNAVAILABLE"
+    assert aces["warnings"]
+    row = aces["policies"][0]
+    assert row["thresholds"] == {"buy": 6, "sell": -6}
+    assert row["metrics"]["train"] is None and row["metrics"]["validation"] is None
+    assert row["test_equity"]["dates"] == report["test_prices"]["dates"]
+    assert len(row["economic_curve"]) == len(report["test_prices"]["dates"])
+    assert row["executions"]
+    assert all(0 <= fill["holding_pct"] <= 100 for fill in row["executions"])
+    assert row["metrics"]["test"]["final_nav"] > 0
+    if not with_benchmark:
+        assert all(point["benchmark_nav"] is None for point in row["economic_curve"])
+    assert not aces["live_enabled"]
+
+
+def test_aces_invalid_prices_are_not_disguised_as_a_completed_backtest():
+    bars = _bars(900)
+    bars[500]["low"] = bars[500]["high"] + 5
+    report = optimizer.run_auto_tune(
+        bars, window_days=20, test_years=1, seed=19,
+        allocation_config={"policy_mode": "CURRENT", "threshold_iterations": 1}, aces_config={"enabled": True})
+    assert report["aces"]["simulation_status"] == "UNAVAILABLE"
+    assert "OHLC" in report["aces"]["error"]
+
+
 def test_holdout_perturbation_cannot_change_any_selected_window_strategy_or_parameter():
     bars = _bars(1300)
     bounds = optimizer._split_ranges(len(bars), test_bars=252)
