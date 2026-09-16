@@ -523,6 +523,11 @@ def summarize_metrics(
     }
 
 
+def minimum_trade_count(segment_years: float) -> int:
+    """Trade evidence required for the validation sufficiency diagnostic."""
+    return max(3, int(round(segment_years)))
+
+
 def objective_score(metrics: Dict[str, Any], segment_years: float) -> float:
     """平衡型目标函数：不以最大化历史收益为唯一目标。
 
@@ -532,12 +537,10 @@ def objective_score(metrics: Dict[str, Any], segment_years: float) -> float:
     - 回撤惩罚：最大回撤绝对值 × 0.60
     - 不再重复奖励 Sortino / 盈亏比 / 胜率 / 单笔收益等相关指标
     - 不设偏好交易频率：换手成本已在成交和权益中计入，避免重复扣费
-    - 交易次数低于 min_trades 时直接判为不合格（避免靠极少量运气交易取胜）
+    - 交易证据不足时扣除最多 0.60 分，仍按实际收益和风险区分候选；
+      证据是否充足单独报告，不让不合格哨兵值污染滚动折的离散程度。
     """
-    min_trades = max(3, int(round(segment_years)))
-    trades = metrics["trades"]
-    if trades < min_trades:
-        return -1.0e6 + float(trades)
+    evidence = _clamp(float(metrics["trades"]) / minimum_trade_count(segment_years), 0.0, 1.0)
 
     dd_frac = abs(metrics["max_drawdown_pct"]) / 100.0
     sharpe_term = _clamp(float(metrics["sharpe"]), -3.0, 3.0)
@@ -547,5 +550,6 @@ def objective_score(metrics: Dict[str, Any], segment_years: float) -> float:
         0.60 * sharpe_term
         + 0.40 * cagr_term
         - 0.60 * dd_frac
+        - 0.60 * (1.0 - evidence)
     )
     return score

@@ -56,4 +56,6 @@ def test_objective_has_no_unattainable_turnover_target_or_redundant_metric_rewar
     assert objective_score(low_turnover, 3) == objective_score(high_turnover, 3)
     assert objective_score(metrics, 3) > objective_score({**metrics, "cagr_pct": 8}, 3)
     assert objective_score(metrics, 3) > objective_score({**metrics, "max_drawdown_pct": -20}, 3)
-    assert objective_score({**metrics, "trades": 1}, 3) < -100000
+    sparse = {**metrics, "trades": 1}
+    assert 0 < objective_score(metrics, 3) - objective_score(sparse, 3) < 1
+    assert objective_score(sparse, 3) > objective_score({**sparse, "cagr_pct": -10}, 3)

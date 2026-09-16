@@ -4,9 +4,25 @@ Auto Tune 完整结果（含 SPY/NAV 曲线）按股票保存在当前浏览器�
 
 Full Auto Tune results, including SPY/NAV curves, are stored per stock in this browser's IndexedDB. A successful new run replaces that stock's result; legacy localStorage caches remain readable. If persistent storage fails, the page displays a warning and keeps the result for stock switching during the current session. Reloading or closing the page can then lose that unsaved result.
 
-当前方法版本为 v6：在联合阈值与配置优化中加入日历 CAGR 门槛、复权标普相对奖励和硬回撤筛选。
+当前方法版本为 v7：修复 DMI/ADX 平滑、低交易数候选的收益排序和训练邻域候选丢失（见下节）。v6 引入的联合优化日历 CAGR 门槛、复权标普相对奖励和硬回撤筛选继续保留。
 目标仓位、增减仓、Q-learning、配置和验证边界见 [资金配置说明](auto-tune-allocation.md)。
+季度宏观选型、历史版本数据、两周交易窗口及 CASH 退避见 [MATR 宏观路由说明](macro-adaptive-trigger-router.md)。
 下文 v2/v3 章节保留作历史行为与兼容说明；联合优化使用默认评分模型，A–F 表仍为独立原配置参考。
+
+## v7：触发策略寻优修复
+
+- DMI/ADX(14) 改为一致的 Wilder 平滑。旧公式将均值初始化与求和递推混用，ADX 可能超过 100，导致 15–30 的趋势强度门槛失效。现在首个 DI 位于第 15 根日线，ADX 在第 28 根日线用 14 个有效 DX 初始化；完全平盘为 0，未完成预热为 `null`。图表和回测仍共享同一公式。
+- A–F 目标保留成本后 CAGR、Sharpe 和回撤项；交易不足时改扣 `0.60 × (1 - min(交易数 / max(3, round(区间年数)), 1))`。旧版 `-1000000 + 交易数` 会让低频盈利与亏损候选分数相同，并淹没滚动折稳定性比较。新目标仍降低少量交易的可信度，但不再丢弃其收益和风险。
+- 交易证据是否充足直接从交易数计算：`validation_eligible_folds` 与 `insufficient_validation_trades` 保留原含义，不能从目标分数推断。零交易策略没有交易证据，得分为 -0.60；若所有实际交易候选都更差，现金路径仍可胜出。
+- 训练搜索已评估的每个爬山邻域候选都进入去重的训练排名，再取 Top-K 做验证。旧版仅保留随机候选与爬山终点，可能丢失训练合格、验证更好的中间候选；此修复不增加搜索模拟次数。
+- A 基线规则、评分仓位比例、买入间隔、费用、次日开盘成交及 ATR 风控不变。最终测试仍只用于报告，不能据此反选参数。方法修复不保证每代策略或每只股票跑赢标普；比较需使用同一窗口、同一成本口径，并区分价格指数与含分红复权基准。
+- UI 布局保持原样。旧结果保留，但必须重新运行 Auto Tune 才能按 v7 应用；API 字段未删改，无新增环境配置或数据库迁移。回滚需同时还原共享因子、回测目标、优化器和 Web 方法版本，随后重新运行。
+
+### English
+
+Methodology v7 fixes Wilder DMI/ADX smoothing and warmup, replaces the million-point low-trade sentinel with a bounded evidence penalty, and retains every already evaluated hill-search neighbor for training-ranked Top-K validation. Return, Sharpe, drawdown, execution costs, score sizing, entry spacing and risk controls retain their existing definitions. Sparse candidates remain penalized and explicitly reported as having insufficient trade evidence; their economic outcomes are no longer discarded. A cash-only candidate scores -0.60 and has no trade evidence.
+
+All parameter selection still precedes the final test. Better search does not guarantee higher future returns or S&P 500 outperformance. The existing UI layout and API fields remain intact; rerun Auto Tune to replace cached v6 results before applying a strategy. Rollback must restore the shared factor formulas, objective, optimizer and Web methodology version together; no database migration is needed.
 
 本文说明 Auto Tune 参数寻优与复合评分的多因子扩展：新增因子、触发规则、
 代际结构（A–F）、权重语义、阈值默认值与寻优范围，以及为什么不引入外部数据源。

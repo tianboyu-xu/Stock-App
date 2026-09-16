@@ -60,3 +60,24 @@ it('sends allocation settings and preserves nested exposure transitions and Q su
   expect(result.allocation?.policies[0].transitions[0].execution?.actualTargetExposure).toBe(.6);
   expect(result.allocation?.qTable[0]).toEqual({ visitCount: 3, updateCount: 500 });
 });
+
+it('requests the macro router explicitly and converts its nested quarter and window contract', async () => {
+  get.mockResolvedValueOnce({ data: { macro_router: { strategy_key: 'MATR', version: 1, status: 'READY',
+    current: { quarter: '2026Q3', feature_quarter: '2026Q2', as_of: '2026-07-01',
+      selected_strategy: 'CASH', score_gap: 0.01, training_quarters: 16,
+      ranking: [{ strategy_key: 'C', expected_utility: -0.01, analog_utility: -0.02 }] },
+    correlations: [{ strategy_key: 'C', sign_stability: 0.8, sample_count: 16 }],
+    history: [{ quarter: '2026Q2', net_return_pct: -2,
+      windows: [{ start_date: '2026-04-01', end_date: '2026-04-14', entry_date: null, exit_date: null }] }],
+  } } });
+  const result = await stocksApi.autoTune('AAPL', { includeMacroRouter: true });
+  expect(get).toHaveBeenLastCalledWith('/api/v1/stocks/AAPL/auto-tune', {
+    params: { include_macro_router: 'true' }, timeout: 900000,
+  });
+  expect(result.macroRouter?.current).toMatchObject({ featureQuarter: '2026Q2', asOf: '2026-07-01',
+    selectedStrategy: 'CASH', scoreGap: 0.01, trainingQuarters: 16,
+    ranking: [{ strategyKey: 'C', expectedUtility: -0.01, analogUtility: -0.02 }] });
+  expect(result.macroRouter?.correlations[0]).toMatchObject({ signStability: 0.8, sampleCount: 16 });
+  expect(result.macroRouter?.history[0].windows[0]).toEqual({ startDate: '2026-04-01',
+    endDate: '2026-04-14', entryDate: null, exitDate: null });
+});

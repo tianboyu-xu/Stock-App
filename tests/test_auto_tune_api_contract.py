@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from src.services.backtest_statistics import summarize_test_confidence
+from src.services.indicator_optimizer import METHODOLOGY_VERSION
 from src.services.allocation.research import AllocationConfig, AllocationStudy
 from src.services.strategy_backtester import (
     prepare_base_series,
@@ -65,7 +66,7 @@ def _report_payload(with_trades):
         AllocationConfig.from_dict({"q": {"episodes": 5}}),
     ).report((60, 89))
     return {
-        "methodology_version": 6,
+        "methodology_version": METHODOLOGY_VERSION,
         "test_prices": {"dates": [bar["date"] for bar in bars], "values": [bar["close"] for bar in bars]},
         "allocation": allocation,
         "window_days": 90,
@@ -120,7 +121,7 @@ def test_auto_tune_api_roundtrip_preserves_research_diagnostics(with_trades, res
     # FastAPI returns AutoTuneResponse(**report); by_alias matches response serialization.
     # The stock client then runs the existing deep toCamelCase converter on these keys.
     wire = json.loads(response_model.model_validate(payload).model_dump_json(by_alias=True))
-    assert wire["methodology_version"] == 6
+    assert wire["methodology_version"] == METHODOLOGY_VERSION
     assert wire["test_prices"] == payload["test_prices"]
     assert wire["allocation"] == json.loads(json.dumps(payload["allocation"]))
     assert wire["walk_forward"] == payload["walk_forward"]

@@ -249,7 +249,12 @@ def test_walk_forward_is_chronological_aggregates_dispersion_and_uses_latest_par
         assert strategy["validation_positive_folds"] == sum(
             fold["metrics"]["cagr_pct"] > 0 for fold in strategy["validation_folds"]
         )
-        assert strategy["validation_eligible_folds"] == sum(score > -1e5 for score in scores)
+        assert strategy["validation_eligible_folds"] == sum(
+            fold["metrics"]["trades"] >= optimizer.minimum_trade_count(
+                fold["validation"]["bars"] / optimizer.TRADING_DAYS_PER_YEAR
+            )
+            for fold in strategy["validation_folds"]
+        )
         if strategy["tuned"]:
             candidate = searches[(strategy["key"], bounds["train"], bounds["validation"])]
             assert strategy["params"]["thresholds"] == optimizer._chart_thresholds(candidate)
@@ -263,6 +268,18 @@ def test_short_or_clipped_history_does_not_invent_short_extra_folds():
     assert all(fold["train"][0] == 220 for fold in folds)
     assert all(fold["validation"][1] <= 1320 for fold in folds[:-1])
     assert folds[-1]["train"] == (220, 1320)
+
+
+def test_sparse_validation_keeps_bounded_scores_and_reports_insufficient_evidence():
+    # This validation segment is too short for three entries 90 bars apart.
+    report = optimizer.run_auto_tune(
+        _bars(760), window_days=90,
+        allocation_config={"policy_mode": "CURRENT", "threshold_iterations": 1},
+    )
+    assert report["split"]["validation"]["bars"] < 180
+    assert all(strategy["validation_eligible_folds"] == 0 for strategy in report["strategies"])
+    assert all(abs(strategy["validation_score"]) < 10 for strategy in report["strategies"])
+    assert report["recommended"]["reason_code"] == "insufficient_validation_trades"
 
 
 def test_fine_tune_folds_use_common_validation_and_expand_only_into_past_data():
@@ -309,6 +326,37 @@ def test_top_k_includes_random_candidates_and_deduplicates_hill_results(monkeypa
     assert len({item[0] for item in validated}) == 8
     assert score == max(item[1] for item in validated)
     assert robustness == sum(item[1] >= score - optimizer.EPS_SIMPLICITY for item in validated) / 8
+
+
+def test_top_k_retains_intermediate_hill_candidate_that_validates_better(monkeypatch):
+    """A training improvement must not discard an already evaluated finalist."""
+    monkeypatch.setattr(optimizer, "SAMPLED_CANDIDATES", 0)
+    monkeypatch.setattr(optimizer, "HILL_CLIMB_SEEDS", 1)
+    monkeypatch.setattr(optimizer, "HILL_CLIMB_SWEEPS", 2)
+    monkeypatch.setattr(optimizer, "TOP_K", 2)
+    monkeypatch.setitem(optimizer.TUNABLE_SCOPES, "B", ("composite_buy_threshold",))
+    train = (220, 599)
+    validation = (600, 899)
+    evaluated = {train: [], validation: []}
+
+    class ScoreSurface:
+        def evaluate(self, thresholds, start, end, gen, stop, trail):
+            # Search can see only development ranges; test starts at bar 900.
+            assert (start, end) in evaluated
+            threshold = thresholds["composite_buy_threshold"]
+            evaluated[(start, end)].append(threshold)
+            scores = {4: 11.0, 5: 10.0} if (start, end) == train else {5: 10.0}
+            return {}, scores.get(threshold, 0.0)
+
+    candidate, score, robustness = optimizer._search_generation(
+        ScoreSurface(), optimizer.GENERATIONS[1], train, validation, random.Random(7),
+    )
+
+    assert 4 in evaluated[train] and 5 in evaluated[train]
+    assert evaluated[validation] == [4, 5]
+    assert candidate["thresholds"]["composite_buy_threshold"] == 5
+    assert score == 10.0
+    assert robustness == 0.5
 
 
 def test_minimum_history_is_checked_after_requested_trim():

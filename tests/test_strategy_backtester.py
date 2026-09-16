@@ -28,6 +28,7 @@ from src.services.strategy_backtester import (
     DEFAULT_SHORT_TERM_TAX_PCT,
     LONG_TERM_HOLDING_BARS,
     compute_composite_signals,
+    minimum_trade_count,
     objective_score,
     prepare_base_series,
     simulate_buy_hold,
@@ -436,9 +437,47 @@ def test_objective_score_penalizes_too_few_trades_and_drawdown():
         "trades_per_year": 4.0,
     }
     few_trades = dict(base_metrics, trades=1)
-    assert objective_score(few_trades, 5.0) < -1.0e5
+    assert objective_score(few_trades, 5.0) == pytest.approx(
+        objective_score(base_metrics, 5.0) - 0.6 * (1 - 1 / minimum_trade_count(5.0))
+    )
     deep_drawdown = dict(base_metrics, max_drawdown_pct=-40.0)
     assert objective_score(base_metrics, 5.0) > objective_score(deep_drawdown, 5.0)
+    assert objective_score(few_trades, 5.0) > objective_score(
+        dict(few_trades, max_drawdown_pct=-40.0), 5.0
+    )
+    assert objective_score(few_trades, 5.0) > objective_score(dict(few_trades, cagr_pct=-10.0), 5.0)
+
+
+def test_sparse_profitable_trades_rank_above_more_frequent_losses_after_costs():
+    # Both candidates trade the same rising path with two temporary spikes.
+    # The sparse candidate holds through the trend; the other buys both peaks.
+    closes = [10.0 + 10.0 * i / 251 for i in range(252)]
+    for peak in (30, 110):
+        closes[peak] = 25.0
+        closes[peak + 15] = 18.0
+    base = prepare_base_series(_make_bars(closes))
+
+    def metrics(buys, sells):
+        simulation = simulate_trades(
+            base, _manual_signals(252, buys=buys, sells=sells), 0, 251,
+            window_days=1, cost_pct_per_side=0.1,
+        )
+        return summarize_metrics(simulation, 0, 251)
+
+    profitable = metrics((0,), (240,))
+    losing = metrics((29, 109), (44, 124))
+    assert profitable["trades"] == 1
+    assert losing["trades"] == 2
+    assert profitable["total_return_pct"] > 0 > losing["total_return_pct"]
+    assert objective_score(profitable, 1) > objective_score(losing, 1)
+
+
+def test_no_trades_has_bounded_penalty_without_inventing_trade_evidence():
+    base = prepare_base_series(_flat_bars(252))
+    simulation = simulate_trades(base, _manual_signals(252), 0, 251)
+    metrics = summarize_metrics(simulation, 0, 251)
+    assert metrics["trades"] == 0 < minimum_trade_count(1)
+    assert objective_score(metrics, 1) == pytest.approx(-0.6)
 
 
 def test_run_auto_tune_returns_six_generations_and_is_deterministic():

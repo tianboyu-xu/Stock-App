@@ -436,6 +436,31 @@ describe('CurrentPositionTable', () => {
     unmount();
   });
 
+  it('toggles the section when the title itself is clicked', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
+      id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',
+      purchasePrice: 100, quantity: 1, account: 'HSA',
+    }]));
+    render(
+      <UiLanguageProvider>
+        <CurrentPositionTable entries={[]} />
+      </UiLanguageProvider>,
+    );
+
+    await screen.findAllByText('AAPL');
+    expect(screen.getByRole('columnheader', { name: 'Quantity' })).toBeInTheDocument();
+
+    const titleToggle = screen.getByRole('button', { name: 'Current positions' });
+    expect(titleToggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(titleToggle);
+    expect(screen.queryByRole('columnheader', { name: 'Quantity' })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.currentPositionsCollapsed.v1')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Current positions' }));
+    expect(screen.getByRole('columnheader', { name: 'Quantity' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('dsa.home.currentPositionsCollapsed.v1')).toBe('false');
+  });
+
   it('starts collapsed when the stored preference is true', async () => {
     window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([{
       id: 'p-aapl', code: 'AAPL', name: 'AAPL', purchaseDate: '2025-09-04',

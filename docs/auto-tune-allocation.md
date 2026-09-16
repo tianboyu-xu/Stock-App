@@ -45,9 +45,15 @@ See [ACES backtest availability](aces.md#backtest-availability--回测结果可�
 中文：ACES 无法完成完整研究时仍按既有评分资金规则和风险限制回测；缺少 SPY 只停用
 基准比较及相对奖励，亏损或零成交的现金结果仍显示。
 
-History and test period are the main inputs. Trade spacing, Fine Tune, presets
-and ACES configuration live under collapsed **Advanced tuning settings**;
-**Trigger thresholds** also starts collapsed. The Web includes ACES by default,
+History, test period, trade window and Fine Tune are the main inputs in the
+Auto Tune (train / validation / test) section. Presets and ACES configuration
+live under collapsed **Advanced tuning settings**;
+**Trigger thresholds** is always expanded in a compact grid under the time
+range. Threshold edits commit on blur/Enter (spinner clicks debounce briefly)
+instead of reloading on every keystroke, so the grid never moves while typing;
+the Summary board above keeps existing entries visible with a subtle refreshing
+indicator during the background refresh instead of collapsing to loading. The Web always includes ACES alongside
+A–F with no opt-out toggle; the default preset is Aggressive with BUY 6,7,8 / SELL -6,-7,-8,
 while the API still requires `aces_config`. Old saved runs remain readable;
 rerun to populate the new execution-chart fields.
 
@@ -55,9 +61,15 @@ Each visible choice contributes its test-period price markers and one NAV line t
 the combined chart. The price chart uses actual execution dates and fill prices,
 including partial sells, stops, risk reductions and final
 liquidation. Buy/sell direction is distinguished by marker color and shape only
-(green ▲ / orange ▼), with no BUY/SELL text. Each marker shows trade budget as a percentage of **pre-fill NAV**,
+(green ▲ / red ▼), with no BUY/SELL text. Each marker shows trade budget as a percentage of **pre-fill NAV**,
 holdings as a percentage of **post-fill NAV**, and the originating signal score
-in `trade% / S score (Hold%)` format.
+in `trade% / S score (Hold%)` format. Indicator trigger glyphs keep one shape
+per group with direction for side (OBV diamonds; composite signals and the
+BOLL/CCI/MFI sell variants are hollow), and the legend mirrors each glyph.
+The executed-trade details list groups trades by side with green BUY / red SELL
+labels, orders rows by date with fill price and each sell's realized return
+versus the latest buy (fees excluded), and follows the holding anchor when it
+is on. Executed trades are also dotted on the selected strategy's NAV line.
 Protective and terminal exits have no signal score and display `—`. These new
 fields do not change the existing ledger's initial-budget cash-flow percentages.
 The API adds optional `test_prices`, `execution_price`, `holding_pct`,
@@ -65,24 +77,47 @@ The API adds optional `test_prices`, `execution_price`, `holding_pct`,
 
 Blocked/HOLD triggers are optionally shown as hollow markers with zero executed
 budget and their reason. They are not trades. Selecting/focusing a marker exposes
-its details; last-63/252-session views help with dense charts. The combined NAV chart uses
+its details; last-63/252-session views help with dense charts. The combined NAV card
+sits directly under the price chart with matching plot geometry, so the price
+date row and the NAV date row meet in the middle and bars line up one to one.
+The trigger legend always shows in a full-width row under the single header row
+(title, live price, composite score and stock code), and the trigger toggles
+stay in one horizontally scrollable row. Date ticks increase with plot width
+(7 on wide plots, 3 on narrow ones), while
+the NAV legend and card info sit below the NAV plot, reading as one continuous
+chart. The price section is always expanded. The legend takes its own full-width row on narrow screens, and date
+ticks thin out automatically there so labels never collide. In the stacked layout both charts share the single middle date axis
+(the live price calendar; windows right-align to the latest bar, and hovering
+a NAV line still shows its own dates). The NAV chart uses
 the full test period, starts from normalized capital 1, includes execution fees,
 and displays only the exact-date adjusted SPY benchmark when available. Missing
-benchmark data is explicit. Reward diagnostics never become fabricated fills.
+benchmark data is explicit. Indicator trigger toggles are remembered per stock.
+Reward diagnostics never become fabricated fills.
+When the viewed stock is held in Current positions, a holding toggle appears on
+the combined chart; turning it on restarts every strategy and reference line
+from 1.0 at the earliest buy date, so performance is measured against the
+holding's cost basis instead of the test-period start. The card stays stacked in
+place when anchoring; only its range, markers and details narrow to the
+holding period, and both
+the price-chart strategy markers and the trade details list filter to the
+holding period there.
 The technical indicator plot stays expanded above the trigger thresholds, and
 research tables remain collapsed below.
 
 中文：每个策略组只按验证评分选版本，同分优先较早代次，不按最终测试收益改选。
 无合格配置时，自适应预算固定回退至调优固定策略（其次固定策略）供诊断；ACES 使用
-开发阶段选定的诊断策略并标注失败。历史年限和测试年限为主要输入，其余设置及触发阈值默认折叠。
-Web 默认包含 ACES，API 仍需显式请求。旧结果可读取，重新调优后补齐新的图表字段。
+开发阶段选定的诊断策略并标注失败。历史年限和测试年限为主要输入，触发阈值常开并位于时间范围下方，高级设置默认折叠。阈值输入在失焦/回车时提交（微调按钮短防抖），输入过程中不逐字重载，网格不会移位；上方摘要看板在后台刷新时保留旧条目并显示刷新指示，不塌陷为加载态。
+Web 始终包含 ACES 且无关闭选项，默认预设为 Aggressive（BUY 6,7,8 / SELL -6,-7,-8），API 仍需显式请求。旧结果可读取，重新调优后补齐新的图表字段。
 
 价格图仅展示测试期，按真实成交日期和价格标注买卖、部分减仓、止损、风险减仓及期末平仓。
-买卖方向仅用标记颜色与形状区分（绿色 ▲ / 橙色 ▼），不显示 BUY/SELL 文字。
+买卖方向仅用标记颜色与形状区分（绿色 ▲ / 红色 ▼），不显示 BUY/SELL 文字。
+指标触发标记每组固定形状并用方向区分买卖（OBV 为菱形，复合信号与 BOLL/CCI/MFI 的卖出为空心图形），图例与图形保持一致。
+已成交交易明细按方向分组并用绿色 BUY / 红色 SELL 标注，按日期排序并展示成交价与每次卖出相对最近买入的盈亏（不含费用），持仓锚定开启时同步过滤到持仓期；已成交交易同时在所选策略 NAV 线上打点。
 标记包含成交前净值占比（预算）、成交后净值占比（持仓）及触发分数，格式为 `trade% / S score (Hold%)`；保护性和期末平仓无触发分数，显示 `—`。
 旧资金表的初始资金占比口径不变。被阻止/保持仓位的触发可选显示为空心标记，成交预算为零，
-不能当作真实交易。合并净值图展示完整测试期的各可见策略实际净值、复权 SPY 和增长目标；包含费用，缺失基准时明确说明。
-奖励、机会遗憾等诊断不能伪造为成交。技术指标图默认展开并位于触发阈值上方，研究详情折叠保留。
+不能当作真实交易。合并净值卡片紧贴价格图下方，两图绘图区对齐、日期轴在中间相接，K 线逐根对齐；标题行含标题、现价、综合评分与股票，触发图例常显占满整行，触发开关单行横滑，日期刻度随宽度加密（宽图 7 个、窄图 3 个），NAV 图例与卡片信息在 NAV 图下方，连为一张图，价格区常开。堆叠态两图共用中间唯一的日期轴（实时价格日历，窗口右对齐到最新一根；悬停 NAV 线仍显示其自身日期）。合并净值图展示完整测试期的各可见策略实际净值、复权 SPY 和增长目标；包含费用，缺失基准时明确说明。指标触发开关按股票记住。
+当前股票在首页当前持仓中持有时，合并净值图会出现持仓锚定开关；开启后全部策略线与参考线自最早买入日起按 1.0 起算，便于相对持仓成本比较表现；卡片保持原位，仅范围、标记与明细收缩到持仓期，价格图策略标记与交易明细同步过滤到持仓期。
+奖励、机会遗憾等诊断不能伪造为成交。触发阈值常开并位于时间范围下方，技术指标图在其下方常开，研究详情折叠保留。
 
 ## Architecture / 架构
 

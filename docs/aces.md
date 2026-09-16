@@ -2,13 +2,15 @@
 
 ACES v1 is an independent Auto Tune research generation alongside A–F. It does not
 change their feature parameters, recommendation ranking or execution rules.
-The Web Auto Tune screen includes ACES by default; disable it under **Advanced
-tuning settings** to omit G's work. API callers still opt in with `aces_config`.
+The Web Auto Tune screen always includes ACES alongside A–F; there is no opt-out
+toggle. The default preset is Aggressive (100% exposure / 25% drawdown) with
+BUY thresholds 6,7,8 and SELL thresholds -6,-7,-8. API callers still opt in with `aces_config`.
 The existing allocation study remains available separately. ACES uses the shared
 default technical scoring model; it does not claim to inherit validation-tuned F
 parameters. This prevents later F selections leaking into earlier ACES folds.
 
-中文：ACES 是独立的 G 代研究策略，Web 自动调优默认包含，可在“高级调优设置”中关闭；
+中文：ACES 是独立的 G 代研究策略，Web 自动调优始终包含且无关闭选项；
+默认预设为 Aggressive（100% 仓位 / 25% 回撤），BUY 阈值 6,7,8，SELL 阈值 -6,-7,-8。
 API 仍需传入 `aces_config` 才会运行。A–F 的参数、推荐和执行保持原路径。
 G 复用默认评分与资金环境，不把验证选出的 F 参数带回早期训练折。
 
@@ -199,7 +201,8 @@ normalized policy fitting always starts at NAV=1.
 ## Configuration / 配置
 
 Defaults below are generated from `ACESConfig().to_dict()`. Basic UI controls
-override advanced JSON fields. Presets populate exposure/drawdown only:
+override advanced JSON fields. The Web default preset is Aggressive (100%/25%)
+with BUY thresholds 6,7,8 and SELL thresholds -6,-7,-8. Presets populate exposure/drawdown only:
 Conservative 60%/10%, Balanced 100%/15%, Aggressive 100%/25%; names do not alter results.
 API omitted drawdown uses the existing portfolio drawdown alert setting (15% by
 default). The multi-stock 35% concentration alert is not transplanted into this
@@ -223,16 +226,10 @@ Percent-suffixed cost inputs are percent units, unlike fraction-valued reward/ri
   "enabled": true,
   "initial_budget": 10000.0,
   "buy_thresholds": [
-    4,
-    5,
-    6,
     7,
     8
   ],
   "sell_thresholds": [
-    -4,
-    -5,
-    -6,
     -7,
     -8
   ],

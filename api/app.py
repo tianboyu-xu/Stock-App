@@ -237,6 +237,21 @@ def _load_runtime_scheduler_args() -> dict:
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
+    async def ensure_ollama_in_background() -> None:
+        try:
+            from src.llm.ollama import ensure_ollama_running
+
+            # The helper may wait for a locally spawned service to become
+            # ready. Do not hold up uvicorn startup while it does so; the
+            # server's own startup probe is intentionally short.
+            await asyncio.to_thread(ensure_ollama_running)
+        except Exception as exc:  # never block server startup on Ollama
+            logger.warning("Ollama auto-start check failed: %s", exc)
+
+    app.state.ollama_autostart_task = asyncio.create_task(
+        ensure_ollama_in_background(),
+        name="ollama-autostart",
+    )
     runtime_owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
         "1",
         "true",
@@ -292,6 +307,13 @@ async def app_lifespan(app: FastAPI):
     try:
         yield
     finally:
+        ollama_task = getattr(app.state, "ollama_autostart_task", None)
+        if ollama_task is not None and not ollama_task.done():
+            ollama_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await ollama_task
+        if hasattr(app.state, "ollama_autostart_task"):
+            delattr(app.state, "ollama_autostart_task")
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()

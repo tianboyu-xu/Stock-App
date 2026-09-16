@@ -96,8 +96,8 @@ class ACESConfig:
     version: int = ACES_VERSION
     enabled: bool = True
     initial_budget: float = 10000.
-    buy_thresholds: tuple = (4, 5, 6, 7, 8)
-    sell_thresholds: tuple = (-4, -5, -6, -7, -8)
+    buy_thresholds: tuple = (6, 7, 8)
+    sell_thresholds: tuple = (-6, -7, -8)
     policy_mode: str = "COMPARE"
     purge_bars: int = 252
     q_finalists: int = 3

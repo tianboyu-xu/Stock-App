@@ -1,59 +1,45 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ACESReport, AllocationReport } from '../../api/stocks';
 import { AutoTuneAllocationPanel } from './AutoTuneAllocationPanel';
+import { DEFAULT_ACES_FIELDS, buildACESConfig } from './acesDefaults';
 
-export function ACESSetup({ onChange, language, disabled, initiallyEnabled = false }: {
-  initiallyEnabled?: boolean;
+export function ACESSetup({ onChange, language, disabled }: {
   onChange: (value: Record<string, unknown> | undefined, valid: boolean) => void;
   language: string; disabled: boolean;
 }) {
   const zh = language === 'zh';
-  const [enabled, setEnabled] = useState(initiallyEnabled);
-  const [budget, setBudget] = useState(10000);
-  const [cagr, setCagr] = useState(30);
-  const [exposure, setExposure] = useState(100);
-  const [drawdown, setDrawdown] = useState(15);
-  const [volatility, setVolatility] = useState(true);
-  const [gap, setGap] = useState(true);
-  const [opportunity, setOpportunity] = useState(true);
-  const [mode, setMode] = useState('COMPARE');
-  const [buy, setBuy] = useState('4,5,6,7,8');
-  const [sell, setSell] = useState('-4,-5,-6,-7,-8');
-  const [folds, setFolds] = useState(3);
-  const [advanced, setAdvanced] = useState('{}');
+  const [budget, setBudget] = useState(DEFAULT_ACES_FIELDS.budget);
+  const [cagr, setCagr] = useState(DEFAULT_ACES_FIELDS.cagr);
+  const [exposure, setExposure] = useState(DEFAULT_ACES_FIELDS.exposure);
+  const [drawdown, setDrawdown] = useState(DEFAULT_ACES_FIELDS.drawdown);
+  const [volatility, setVolatility] = useState(DEFAULT_ACES_FIELDS.volatility);
+  const [gap, setGap] = useState(DEFAULT_ACES_FIELDS.gap);
+  const [opportunity, setOpportunity] = useState(DEFAULT_ACES_FIELDS.opportunity);
+  const [mode, setMode] = useState(DEFAULT_ACES_FIELDS.mode);
+  const [buy, setBuy] = useState(DEFAULT_ACES_FIELDS.buy);
+  const [sell, setSell] = useState(DEFAULT_ACES_FIELDS.sell);
+  const [folds, setFolds] = useState(DEFAULT_ACES_FIELDS.folds);
+  const [advanced, setAdvanced] = useState(DEFAULT_ACES_FIELDS.advanced);
   const [error, setError] = useState('');
-  const current = { enabled, budget, cagr, exposure, drawdown, volatility, gap, opportunity, mode, buy, sell, folds, advanced };
+  const current = { budget, cagr, exposure, drawdown, volatility, gap, opportunity, mode, buy, sell, folds, advanced };
   function update(patch: Partial<typeof current>) {
     const next = { ...current, ...patch };
     try {
-      const buys = next.buy.split(',').map(Number), sells = next.sell.split(',').map(Number);
-      if (!(next.budget > 0 && next.budget <= 1e12) || ![next.cagr, next.exposure, next.drawdown].every(v => Number.isFinite(v) && v >= 0 && v <= 100)
-        || !Number.isInteger(next.folds) || next.folds < 2 || next.folds > 5
-        || ![buys, sells].every(a => a.length >= 1 && a.length <= 7 && new Set(a).size === a.length)
-        || !buys.every(v => Number.isInteger(v) && v > 0 && v <= 30) || !sells.every(v => Number.isInteger(v) && v < 0 && v >= -30)) throw new Error(zh ? '请检查预算、阈值及风险范围。' : 'Check budget, thresholds and risk ranges.');
-      const overrides = JSON.parse(next.advanced) as Record<string, unknown>;
-      if (!overrides || Array.isArray(overrides) || typeof overrides !== 'object') throw new Error('Advanced settings must be an object.');
-      const allocation = (overrides.allocation ?? {}) as Record<string, unknown>;
-      const risk = (overrides.risk ?? {}) as Record<string, unknown>;
-      const execution = (overrides.execution ?? {}) as Record<string, unknown>;
-      const config = { ...overrides, version: 1, enabled: next.enabled, initial_budget: next.budget,
-        policy_mode: next.mode, buy_thresholds: buys, sell_thresholds: sells,
-        allocation: { ...allocation, validation_folds: next.folds, lambda_opportunity: next.opportunity ? .25 : 0,
-          economic: { ...(allocation.economic as object ?? {}), target_cagr: next.cagr / 100, allowed_max_drawdown: next.drawdown / 100 } },
-        risk: { ...risk, maximum_exposure: next.exposure / 100, volatility_control: next.volatility },
-        execution: { ...execution, max_entry_gap_atr: next.gap ? 1 : null } };
-      setError(''); onChange(next.enabled ? config : undefined, true);
-    } catch (e) { setError(String(e)); onChange(undefined, !next.enabled); }
+      const config = buildACESConfig(next, zh);
+      setError(''); onChange(config, true);
+    } catch (e) { setError(String(e)); onChange(undefined, false); }
   }
+  useEffect(() => {
+    update({});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const inputClass = 'rounded border border-border bg-transparent p-1 w-28';
   const label = (en: string, cn: string) => zh ? cn : en;
   return <fieldset disabled={disabled} className="my-3 rounded border border-border p-3 text-xs">
     <legend>Strategy G — ACES · {label('Adaptive Capital Efficiency', '自适应资金效率')}</legend>
-    <label><input type="checkbox" checked={enabled} onChange={e => { setEnabled(e.target.checked); update({ enabled: e.target.checked }); }} /> {label('Include ACES alongside A–F', '独立运行 ACES，并保留 A–F 对比')}</label>
-    {enabled && <>
-      <p className="my-2">{label('Optimizes triggers and capital allocation with portfolio, time-value, benchmark and risk constraints. Ticker and history/test dates use the Auto Tune controls above.', '在预算、时间价值、基准及风险约束下优化触发和配置。股票及历史/测试日期使用上方 Auto Tune 设置。')}</p>
+      <p className="my-2">{label('Always runs alongside A–F. Optimizes triggers and capital allocation with portfolio, time-value, benchmark and risk constraints. Ticker and history/test dates use the Auto Tune controls above.', '始终与 A–F 一并运行。在预算、时间价值、基准及风险约束下优化触发和配置。股票及历史/测试日期使用上方 Auto Tune 设置。')}</p>
       <div className="my-2 flex flex-wrap gap-3">
-        <label>{label('Preset', '预设')} <select className={inputClass} defaultValue="Balanced" onChange={e => {
+        <label>{label('Preset', '预设')} <select className={inputClass} defaultValue="Aggressive" onChange={e => {
           const value = e.target.value; const cap = value === 'Conservative' ? 60 : 100; const dd = value === 'Conservative' ? 10 : value === 'Aggressive' ? 25 : 15;
           setExposure(cap); setDrawdown(dd); update({ exposure: cap, drawdown: dd });
         }}><option>Conservative</option><option>Balanced</option><option>Aggressive</option></select></label>
@@ -78,7 +64,6 @@ export function ACESSetup({ onChange, language, disabled, initiallyEnabled = fal
         <textarea aria-label="ACES advanced JSON" className="w-full rounded border border-border bg-transparent p-2 font-mono" rows={6} value={advanced} onChange={e => { setAdvanced(e.target.value); update({ advanced: e.target.value }); }} />
       </details>
       {error && <p role="alert">{error}</p>}
-    </>}
   </fieldset>;
 }
 

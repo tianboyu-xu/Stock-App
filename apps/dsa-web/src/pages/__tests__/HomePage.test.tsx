@@ -535,7 +535,7 @@ describe('HomePage', () => {
       '600519',
       expect.objectContaining({ period: 'daily', days: 30 }),
     );
-    const summaryButton = await screen.findByRole('button', { name: '从摘要打开 600519 最新分析详情' });
+    const summaryButton = await screen.findByRole('button', { name: '从摘要打开 600519 实时价格图并核对最新触发' });
     expect(summaryButton.textContent).toContain('600519');
     expect(summaryButton.textContent).not.toContain('贵州茅台');
     expect(summaryButton.getAttribute('style')).toContain('--success');
@@ -548,7 +548,7 @@ describe('HomePage', () => {
     expect(await screen.findByText('趋势维持强势')).toBeInTheDocument();
   });
 
-  it('shows all summary stocks as code-only items without a scrollbar', async () => {
+  it('shows all summary stocks as chart-linked items without a scrollbar', async () => {
     vi.mocked(historyApi.getList).mockResolvedValue({
       total: 0,
       page: 1,
@@ -631,8 +631,9 @@ describe('HomePage', () => {
     const items = await screen.findByTestId('signal-summary-items');
     expect(items.children).toHaveLength(2);
     expect(items.className).not.toContain('overflow');
-    const sellButton = await screen.findByRole('button', { name: '摘要中暂无 600519 的分析详情，可先分析' });
+    const sellButton = await screen.findByRole('button', { name: '从摘要打开 600519 实时价格图并核对最新触发' });
     expect(sellButton.getAttribute('style')).toContain('--destructive');
+    expect(sellButton).toBeEnabled();
   });
 
   it('refetches the summary with fresh thresholds after a threshold change', async () => {

@@ -49,6 +49,29 @@ def _dedupe_stock_code_key(stock_code: str) -> str:
     return resolve_index_stock_code_for_analysis(normalize_stock_code(stock_code))
 
 
+# Marker appended by src.llm.errors.build_ollama_connection_hint. The TaskPanel
+# only renders task.message, so without special handling the fixed [:50]/[:200]
+# truncation below would cut the actionable hint off.
+_OLLAMA_CONNECTION_HINT_MARKER = "Ollama connection hint:"
+
+
+def summarize_task_failure(error_msg: str) -> Tuple[str, str]:
+    """Split a task failure into (error, message) for user-visible display.
+
+    Ordinary errors keep the historical truncation behavior. When the error
+    carries the Ollama connection hint, the hint is preserved verbatim in
+    ``error`` and ``message`` points at the remediation steps instead of a
+    truncated generic prefix.
+    """
+    if _OLLAMA_CONNECTION_HINT_MARKER in error_msg:
+        hint_index = error_msg.index(_OLLAMA_CONNECTION_HINT_MARKER)
+        return (
+            error_msg[hint_index:][:500],
+            "分析失败: Ollama 服务连接失败，请先启动 Ollama（`ollama serve`），详见 docs/FAQ.md Q12c",
+        )
+    return error_msg[:200], f"分析失败: {error_msg[:50]}"
+
+
 class TaskStatus(str, Enum):
     """Task status enumeration"""
     PENDING = "pending"        # Waiting for execution
@@ -779,8 +802,7 @@ class AnalysisTaskQueue:
                 if task:
                     task.status = TaskStatus.FAILED
                     task.completed_at = datetime.now()
-                    task.error = error_msg[:200]  # 限制错误信息长度
-                    task.message = f"分析失败: {error_msg[:50]}"
+                    task.error, task.message = summarize_task_failure(error_msg)
                     
                     # 从分析中集合移除
                     dedupe_key = _dedupe_stock_code_key(task.stock_code)

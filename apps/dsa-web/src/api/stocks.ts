@@ -154,7 +154,7 @@ export interface StockIndicatorsResponse {
 export type AutoTuneSegmentKey = 'train' | 'validation' | 'test' | 'trainValidation';
 
 // Increment with backend selection/accounting changes; persisted results are not migrated.
-export const AUTO_TUNE_METHODOLOGY_VERSION = 6;
+export const AUTO_TUNE_METHODOLOGY_VERSION = 7;
 
 export interface AutoTuneSegmentMetrics {
   totalReturnPct: number;
@@ -504,8 +504,72 @@ export interface ACESReport extends Omit<AllocationReport, 'config'> {
   liveEnabled: boolean; liveStatus?: string;
 }
 
+export interface MacroFamilyStatistics {
+  returnPct: number; maxDrawdownPct: number; tradeCount: number;
+  activeWindows: number; completedWindows: number; holdingBars: number; exposureRatePct: number;
+}
+
+export interface MacroRouterReport {
+  strategyKey: 'MATR';
+  version: number;
+  status: 'READY' | 'INSUFFICIENT_HISTORY' | 'UNAVAILABLE';
+  reason?: string;
+  current?: {
+    quarter: string;
+    featureQuarter: string;
+    asOf: string;
+    snapshotId: string;
+    regime: { key: string; factors: Record<string, number> };
+    selectedStrategy: string;
+    confidence: 'low' | 'medium' | 'high';
+    scoreGap: number;
+    cashMargin?: number;
+    confidenceThreshold?: number;
+    trainingQuarters: number;
+    ranking: { strategyKey: string; expectedUtility: number; analogUtility: number }[];
+    topFeatures?: string[];
+    parameters?: Record<string, unknown>;
+    windowStart?: string | null;
+  } | null;
+  correlations: {
+    feature: string; strategyKey: string; correlation: number;
+    signStability: number; sampleCount: number;
+  }[];
+  history: {
+    quarter: string; selectedStrategy: string; regime: string; complete?: boolean;
+    netReturnPct: number; spyReturnPct: number; regret: number; utility: number;
+    tradeCount?: number; activeWindows?: number; completedWindows?: number;
+    holdingBars?: number; exposureRatePct?: number;
+    familyReturns?: Record<string, number>;
+    familyStatistics?: Record<string, MacroFamilyStatistics>;
+    windows: {
+      startDate: string; endDate: string; strategyKey: string;
+      entryDate?: string | null; exitDate?: string | null;
+      netReturnPct: number; spyReturnPct: number; utility: number;
+    }[];
+  }[];
+  diagnostics?: {
+    oosQuarters: number; meanRegret: number; totalReturnPct: number;
+    spyTotalReturnPct: number; winRatePct: number; beatSpyRatePct: number;
+    startDate?: string; endDate?: string;
+    cashQuarterRatePct?: number; tradeCount?: number;
+    activeWindowRatePct?: number; exposureRatePct?: number;
+    familyComparisons?: {
+      strategyKey: string; oosQuarters: number; totalReturnPct: number;
+      maxDrawdownPct: number; tradeCount: number; activeWindowRatePct: number; exposureRatePct: number;
+    }[];
+  } | null;
+  testEquity?: AutoTuneEquitySeries;
+  testDecisions?: AutoTuneDecision[];
+  benchmarkEquity?: AutoTuneEquitySeries;
+  testPrices?: AutoTuneEquitySeries;
+  targetCagr?: number;
+  warnings?: string[];
+}
+
 export interface AutoTuneResponse {
   testPrices?: AutoTuneEquitySeries;
+  macroRouter?: MacroRouterReport | null;
   aces?: ACESReport | null;
   allocation?: AllocationReport | null;
   methodologyVersion?: number | null;
@@ -681,6 +745,7 @@ export const stocksApi = {
       fineTuneWindowDays?: number;
       allocationConfig?: Record<string, unknown>;
       acesConfig?: Record<string, unknown>;
+      includeMacroRouter?: boolean;
     } = {},
   ): Promise<AutoTuneResponse> {
     const queryParams: Record<string, string | number> = {};
@@ -692,10 +757,11 @@ export const stocksApi = {
     if (params.fineTuneWindowDays != null) queryParams.fine_tune_window_days = params.fineTuneWindowDays;
     if (params.allocationConfig) queryParams.allocation_config = JSON.stringify(params.allocationConfig);
     if (params.acesConfig) queryParams.aces_config = JSON.stringify(params.acesConfig);
+    if (params.includeMacroRouter) queryParams.include_macro_router = 'true';
     const response = await apiClient.get<Record<string, unknown>>(
       `/api/v1/stocks/${encodeURIComponent(code)}/auto-tune`,
-      // 个股与标普500 基准两次串行取数，数据源降级时各需 ~130s，放宽超时上限
-      { params: queryParams, timeout: params.acesConfig ? 900000 : 300000 },
+      // ACES / MATR 还需嵌套历史寻优；MATR 首次请求包含宏观历史版本下载。
+      { params: queryParams, timeout: params.acesConfig || params.includeMacroRouter ? 900000 : 300000 },
     );
     return toCamelCase<AutoTuneResponse>(response.data);
   },

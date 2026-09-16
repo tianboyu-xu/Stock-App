@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 import statistics
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 # 复合评分中扩展因子的分解键（并入 buy/sell_breakdown）
 FACTOR_BREAKDOWN_KEYS = ("boll", "cci", "dmi", "mfi", "volume", "range52")
@@ -114,14 +114,12 @@ def compute_extra_factor_series(
         denom = 0.015 * avedev
         cci[i] = 0.0 if denom == 0 else (typical[i] - mean) / denom
 
-    # DMI / ADX(14)：Wilder 平滑口径（TR、+DM、-DM、DX 全部用同一约定）
+    # DMI / ADX(14)：DM/TR 用 Wilder 平滑和，ADX 用 DX 的 Wilder 平滑均值。
+    # 与 TA-Lib 一致：首根 bar 无方向变化；DI 从 index 14、ADX 从 index 27 输出。
     tr: List[float] = [0.0] * n
     plus_dm: List[float] = [0.0] * n
     minus_dm: List[float] = [0.0] * n
-    for i in range(n):
-        if i == 0:
-            tr[i] = high[i] - low[i]
-            continue
+    for i in range(1, n):
         up_move = high[i] - high[i - 1]
         down_move = low[i - 1] - low[i]
         tr[i] = max(
@@ -132,34 +130,35 @@ def compute_extra_factor_series(
         plus_dm[i] = up_move if up_move > down_move and up_move > 0.0 else 0.0
         minus_dm[i] = down_move if down_move > up_move and down_move > 0.0 else 0.0
 
-    def _wilder(values: Sequence[float], period: int) -> List[Optional[float]]:
+    def _wilder_sum(values: Sequence[float], period: int) -> List[Optional[float]]:
         out: List[Optional[float]] = [None] * n
-        prev: Optional[float] = None
-        for i in range(n):
-            if i + 1 < period:
-                continue
-            if prev is None:
-                prev = sum(values[: i + 1]) / period
-            else:
-                prev = prev * (period - 1) / period + values[i]
+        prev = sum(values[1:period])
+        for i in range(period, n):
+            prev = prev - prev / period + values[i]
             out[i] = prev
         return out
 
-    atr_w = _wilder(tr, 14)
-    plus_di_raw = _wilder(plus_dm, 14)
-    minus_di_raw = _wilder(minus_dm, 14)
+    atr_w = _wilder_sum(tr, 14)
+    plus_di_raw = _wilder_sum(plus_dm, 14)
+    minus_di_raw = _wilder_sum(minus_dm, 14)
     plus_di: List[Optional[float]] = [None] * n
     minus_di: List[Optional[float]] = [None] * n
     dx: List[float] = [0.0] * n
-    for i in range(n):
-        if atr_w[i] in (None, 0.0):
+    for i in range(14, n):
+        if atr_w[i] == 0.0:
+            plus_di[i] = minus_di[i] = 0.0
             continue
         plus_di[i] = plus_di_raw[i] * 100.0 / atr_w[i]  # type: ignore[operator]
         minus_di[i] = minus_di_raw[i] * 100.0 / atr_w[i]  # type: ignore[operator]
         total_di = plus_di[i] + minus_di[i]  # type: ignore[operator]
         if total_di:
             dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / total_di  # type: ignore[operator]
-    adx = _wilder(dx, 14)
+    adx: List[Optional[float]] = [None] * n
+    # 只用已经完成 DI 预热的 14 个 DX 初始化，不能把预热期的零值混入均值。
+    if n > 27:
+        adx[27] = sum(dx[14:28]) / 14.0
+        for i in range(28, n):
+            adx[i] = (adx[i - 1] * 13.0 + dx[i]) / 14.0  # type: ignore[operator]
 
     # MFI(14)：典型价 × 成交量的正/负资金流量，14 日窗口求和
     pos_flow: List[float] = [0.0] * n

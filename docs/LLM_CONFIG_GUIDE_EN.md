@@ -148,11 +148,17 @@ GEMINI_API_KEY=AIzac...
 OLLAMA_API_BASE=http://localhost:11434
 LITELLM_MODEL=ollama/qwen3.8:27b
 # Lightweight alternative (~6.6GB): LITELLM_MODEL=ollama/qwen3.5:9b
+# Check and start local Ollama in the background when Web/API starts (default on)
+OLLAMA_AUTO_START=true
+# Maximum seconds to wait for Ollama readiness after auto-start
+OLLAMA_AUTO_START_TIMEOUT_SECONDS=60
 ```
 
 > **Important**: Ollama must be configured with `OLLAMA_API_BASE`. **Do not** use `OPENAI_BASE_URL`, or the system will concatenate URLs incorrectly (e.g. 404, `api/generate/api/show`). For remote Ollama, set `OLLAMA_API_BASE` to the actual address (e.g. `http://192.168.1.100:11434`). Current dependency constraint is `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` (matches requirements.txt).
 
 > **Congratulations! If you're a beginner, you can stop reading here and run the program!**
+
+When `server.py`, `webui.py`, or `main.py --serve-only` starts, the application checks the configured local Ollama endpoint and runs `ollama serve` in the background when needed. Remote Ollama endpoints are never started locally. Set `OLLAMA_AUTO_START=false` to disable this behavior; a failed check never prevents the Web/API server from starting.
 > Want to test the connection? Open your terminal in the root directory and run: `python scripts/check_env.py --llm`
 
 ---

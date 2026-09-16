@@ -1165,6 +1165,12 @@ class Config:
     sqlite_write_retry_max: int = 3
     sqlite_write_retry_base_delay: float = 0.1
 
+    # MATR uses ALFRED vintages; missing credentials leave existing strategies usable.
+    fred_api_key: Optional[str] = None
+    matr_data_dir: Optional[str] = None
+    matr_request_timeout_seconds: float = 15.0
+    matr_request_retries: int = 2
+
     # 是否保存分析上下文快照（用于历史回溯）
     save_context_snapshot: bool = True
 
@@ -2100,6 +2106,16 @@ class Config:
             share_image_xiaohongshu_qr_path=(os.getenv('SHARE_IMAGE_XIAOHONGSHU_QR_PATH') or '').strip() or None,
             prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
+            fred_api_key=(os.getenv('FRED_API_KEY') or '').strip() or None,
+            matr_data_dir=(os.getenv('MATR_DATA_DIR') or '').strip() or None,
+            matr_request_timeout_seconds=parse_env_float(
+                os.getenv('MATR_REQUEST_TIMEOUT_SECONDS'), 15.0,
+                field_name='MATR_REQUEST_TIMEOUT_SECONDS', minimum=0.1,
+            ),
+            matr_request_retries=parse_env_int(
+                os.getenv('MATR_REQUEST_RETRIES'), 2,
+                field_name='MATR_REQUEST_RETRIES', minimum=0,
+            ),
             sqlite_wal_enabled=os.getenv('SQLITE_WAL_ENABLED', 'true').lower() == 'true',
             sqlite_busy_timeout_ms=parse_env_int(
                 os.getenv('SQLITE_BUSY_TIMEOUT_MS'),

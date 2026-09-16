@@ -71,6 +71,11 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
 ]
 
 WEB_SETTINGS_HIDDEN_FROM_UI = {
+    # MATR credentials and cache controls are deployment settings in .env.
+    "FRED_API_KEY",
+    "MATR_DATA_DIR",
+    "MATR_REQUEST_TIMEOUT_SECONDS",
+    "MATR_REQUEST_RETRIES",
     "DATABASE_PATH",
     "SQLITE_WAL_ENABLED",
     "SQLITE_BUSY_TIMEOUT_MS",

@@ -48,6 +48,7 @@ from src.services.strategy_backtester import (
     DEFAULT_SHORT_TERM_TAX_PCT,
     TRADING_DAYS_PER_YEAR,
     compute_composite_signals,
+    minimum_trade_count,
     objective_score,
     prepare_base_series,
     simulate_buy_hold,
@@ -266,7 +267,7 @@ HILL_CLIMB_SWEEPS = 2      # 爬山搜索的最大扫描轮数
 EPS_SIMPLICITY = 0.05      # “足够好”容差：验证分差距小于该值即视为相当
 MAX_VALIDATION_FOLDS = 3
 MIN_VALIDATION_FOLD_BARS = 252  # 不为了折数人为拆出无法形成足够交易的短窗口
-METHODOLOGY_VERSION = 6
+METHODOLOGY_VERSION = 7
 MIN_TRADE_GAP_BARS = 5
 
 # 基准对比：标普500 指数代码（走 YFinance 美股指数路由）与最少可用 bar 数。
@@ -487,6 +488,9 @@ def _search_generation(
                     else:
                         trial[path] = grid[new_position]
                     trial_score = train_score(trial)
+                    # Every evaluated neighbor can qualify on training score;
+                    # the endpoint need not generalize better than its path.
+                    pool.append((trial_score, len(pool), trial))
                     if trial_score > current_score + 1e-9:
                         current, current_score, improved = trial, trial_score, True
             if not improved:
@@ -597,7 +601,9 @@ def _select_generation(
         metrics, score = evaluator.evaluate(
             chosen["thresholds"], *fold["validation"], gen, stop, trail,
         )
-        records.append({**fold, "metrics": metrics, "score": score})
+        years = (fold["validation"][1] - fold["validation"][0] + 1) / TRADING_DAYS_PER_YEAR
+        records.append({**fold, "metrics": metrics, "score": score,
+                        "sufficient_trades": metrics["trades"] >= minimum_trade_count(years)})
     scores = [record["score"] for record in records]
     return {
         "candidate": chosen,
@@ -1078,7 +1084,7 @@ def run_auto_tune(
     }
     best_key = max(validation_scores, key=lambda key: validation_scores[key])
     recommended_key = _simplest_generation(validation_scores)
-    if not any(fold["score"] > -1.0e5 for fold in selections[recommended_key]["folds"]):
+    if not any(fold["sufficient_trades"] for fold in selections[recommended_key]["folds"]):
         reason_code = "insufficient_validation_trades"
     elif recommended_key == "A":
         reason_code = "baseline_sufficient"
@@ -1226,7 +1232,7 @@ def run_auto_tune(
             "validation_worst_cagr_pct": min(
                 fold["metrics"]["cagr_pct"] for fold in selected["folds"]
             ),
-            "validation_eligible_folds": sum(fold["score"] > -1.0e5 for fold in selected["folds"]),
+            "validation_eligible_folds": sum(fold["sufficient_trades"] for fold in selected["folds"]),
             "validation_folds": [
                 {"train": range_info(fold["train"]), "validation": range_info(fold["validation"]),
                  "metrics": fold["metrics"], "score": fold["score"]}

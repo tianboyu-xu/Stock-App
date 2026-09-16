@@ -471,7 +471,16 @@ export const CurrentPositionTable: React.FC<CurrentPositionTableProps> = ({ entr
       <div className="space-y-1 px-3 py-3 sm:px-4">
         <DashboardPanelHeader
           className="mb-0"
-          title={t('home.currentPositionsTitle')}
+          title={(
+            <button
+              type="button"
+              onClick={handleCollapsedToggle}
+              aria-expanded={!isCollapsed}
+              className="cursor-pointer rounded text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/30"
+            >
+              {t('home.currentPositionsTitle')}
+            </button>
+          )}
           titleClassName="text-sm font-medium"
           leading={<span className="h-2 w-2 rounded-full bg-primary shadow-glow-cyan" aria-hidden="true" />}
           actions={(

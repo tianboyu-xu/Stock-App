@@ -831,6 +831,7 @@ def auto_tune_stock(
     fine_tune_window_days: Optional[int] = Query(None, ge=60, le=3000, description="Fine Tune 滑动训练窗口天数（可选）"),
     allocation_config: Optional[str] = Query(None, max_length=4096, description="资金配置设置 JSON，见 Auto Tune 文档"),
     aces_config: Optional[str] = Query(None, max_length=8192, description="Strategy G ACES versioned configuration JSON; omitted means disabled"),
+    include_macro_router: bool = Query(False, description="Include MATR quarterly macro routing and 10-session execution; requires FRED vintages"),
 ) -> AutoTuneResponse:
     """
     Auto Tune 参数寻优
@@ -933,6 +934,13 @@ def auto_tune_stock(
             aces_metadata={"ticker": stock_code, "provider": result.get("source"),
                            "adjustment_mode": result.get("price_basis")},
         )
+        if include_macro_router:
+            from src.services.macro_router import run_macro_router
+            report["macro_router"] = run_macro_router(
+                bars, symbol=stock_code, benchmark=allocation_benchmark,
+                price_basis=result.get("price_basis"),
+                economic_config=AllocationConfig.from_dict(config_values).economic,
+            )
         return AutoTuneResponse(**report)
 
     except BenchmarkDataMissing as e:

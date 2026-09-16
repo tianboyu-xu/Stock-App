@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneResponse, type AllocationMetrics, type AllocationTransition } from '../../../api/stocks';
+import { AUTO_TUNE_METHODOLOGY_VERSION, stocksApi, type AutoTuneResponse, type AutoTuneStrategyResult, type AllocationMetrics, type AllocationTransition } from '../../../api/stocks';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
 import { UI_LANGUAGE_STORAGE_KEY } from '../../../utils/uiLanguage';
 import { StockIndicatorChart } from '../StockIndicatorChart';
-import { strategyPresentation } from '../autoTunePresentation';
+import { isVisibleTradeMark, strategyPresentation, combinedStrategyCurves, findHoldingAnchor, navTradeDots, rebaseRowsFromPurchaseDate, selectDateTickCount, withTradePnL } from '../autoTunePresentation';
+import { CURRENT_POSITIONS_STORAGE_KEY } from '../../../utils/currentPosition';
+import { visibleTriggersStorageKey } from '../../../utils/visibleTriggers';
 import { clearAutoTuneSessionCache, peekAutoTuneState } from '../../../utils/autoTuneStorage';
 
 vi.mock('../../../api/stocks', async () => {
@@ -56,10 +58,10 @@ function buildIndicatorResponse() {
       kdjSell: [null, null, null, null, null, null],
       rsiBuy: [null, null, null, null, null, null],
       rsiSell: [null, null, null, null, null, null],
-      obvBuy: [null, null, null, null, null, null],
+      obvBuy: [null, null, 103, null, null, null],
       obvSell: [null, null, null, null, null, null],
       bollBuy: [null, null, null, 110, null, null],
-      bollSell: [null, null, null, null, null, null],
+      bollSell: [null, null, null, null, 112, null],
       cciBuy: [null, null, null, null, null, null],
       cciSell: [null, null, null, null, null, null],
       dmiBuy: [null, null, null, null, null, null],
@@ -309,12 +311,13 @@ describe('StockIndicatorChart auto tune panel', () => {
     vi.mocked(stocksApi.autoTune).mockResolvedValue(buildAutoTuneResponse());
   });
 
-  it('shows the five strategy options and shares selection and range with the NAV chart', async () => {
+  it('shows the six strategy options and shares selection and range with the NAV chart', async () => {
     renderChart();
     await runAutoTuneAndGetPlot();
+    expect(vi.mocked(stocksApi.autoTune).mock.calls.at(-1)?.[1]).toMatchObject({ includeMacroRouter: true });
 
     const strategySelect = screen.getByTestId('trigger-strategy-select') as HTMLSelectElement;
-    expect(strategySelect.options).toHaveLength(5);
+    expect(strategySelect.options).toHaveLength(6);
     expect(strategySelect).toHaveValue('baseline');
     expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
     expect(screen.getByTestId('strategy-combined-chart')).toBeInTheDocument();
@@ -331,7 +334,8 @@ describe('StockIndicatorChart auto tune panel', () => {
 
     const lastCall = vi.mocked(stocksApi.autoTune).mock.calls.at(-1);
     expect(lastCall?.[0]).toBe('600519');
-    expect(lastCall?.[1]?.acesConfig).toEqual({ version: 1, enabled: true, allocation: { economic: { allowed_max_drawdown: .15 } } });
+    expect(lastCall?.[1]?.acesConfig).toMatchObject({ version: 1, enabled: true, buy_thresholds: [6, 7, 8], sell_thresholds: [-6, -7, -8],
+      allocation: { economic: { allowed_max_drawdown: .25 } } });
   });
 
   it('keeps the new report after switching stocks when localStorage rejects the save', async () => {
@@ -377,6 +381,54 @@ describe('StockIndicatorChart auto tune panel', () => {
     } finally {
       setItem.mockRestore();
     }
+  });
+
+  it('requests MATR from the trigger selector and keeps missing macro data distinct from A–F signals', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    response.macroRouter = { strategyKey: 'MATR', version: 1, status: 'UNAVAILABLE',
+      reason: 'FRED_API_KEY_MISSING', correlations: [], history: [] };
+    response.strategies[0].testDecisions = [{ date: '2026-03-02', signalDate: '2026-03-01',
+      side: 'buy', status: 'executed', reason: 'signal', executionPrice: 107, tradeNavPct: 100,
+      holdingPct: 100, score: 7, suggestedBudgetPct: 100, executedBudgetPct: 100, cashAfterPct: 0 }];
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    const select = screen.getByTestId('trigger-strategy-select');
+    fireEvent.change(select, { target: { value: 'macro_router' } });
+    expect(screen.getByTestId('macro-router-panel')).toHaveTextContent('Run Auto Tune to include MATR in the strategy comparison');
+    fireEvent.click(screen.getByRole('button', { name: 'Auto Tune' }));
+    await waitFor(() => expect(screen.getByTestId('macro-router-panel')).toHaveTextContent('FRED_API_KEY_MISSING'));
+    expect(vi.mocked(stocksApi.autoTune).mock.calls.at(-1)?.[1]).toMatchObject({ includeMacroRouter: true });
+    expect(select).toHaveValue('macro_router');
+    expect(screen.queryByRole('img', { name: /2026-03-02.*BUY.*100\.0%/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply selected to chart' })).toBeDisabled();
+    expect(strategyPresentation(response, 'macro_router').marks).toEqual([]);
+  });
+
+  it('keeps MATR and other strategy NAV lines together when changing the trigger selection', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    response.macroRouter = { strategyKey: 'MATR', version: 2, status: 'READY', correlations: [], history: [],
+      testEquity: { dates: equityDates.slice(1, 4), values: [10, 8, 14] },
+      benchmarkEquity: { dates: equityDates.slice(1, 4), values: [20, 25, 30] },
+    };
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const combined = await screen.findByTestId('strategy-combined-chart');
+    expect(combined).toHaveTextContent('3 available strategies are shown together');
+    expect(combined).toHaveTextContent('Common history: 2024-03-01 to 2024-09-02');
+    expect(screen.queryByTestId('shared-date-axis')).not.toBeInTheDocument();
+    const priceChart = screen.getByRole('img', { name: 'Technical indicators' });
+    expect(within(priceChart).getByText('2026-03-01')).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('trigger-strategy-select'), { target: { value: 'macro_router' } });
+    expect(combined).toHaveTextContent('3 available strategies are shown together');
+    expect(combined).toHaveTextContent('Selected strategy: MATR');
+    expect(screen.getByTestId('macro-router-panel')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply selected to chart' })).toBeDisabled();
+    const rows = combinedStrategyCurves(response, ['baseline', 'trend', 'macro_router']).rows;
+    expect(rows.every(row => ['baseline', 'trend', 'macro_router'].every(family => row[`nav:${family}`] != null))).toBe(true);
   });
 
   it('restores the saved auto tune result and plot state for the current stock', async () => {
@@ -689,11 +741,447 @@ describe('StockIndicatorChart auto tune panel', () => {
     expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
   });
 
-  it('collapses thresholds and advanced inputs by default', async () => {
+  it('draws the ACES line even when selection fields miss every policy name', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const metrics: AllocationMetrics = { ...segmentMetrics, targetCagr: .3, initialNav: 1, finalNav: 1.1,
+      tradeCount: 2, turnover: 1, averageExposurePct: 80, transactionCost: 0, allocationDecisions: 2,
+      budgetConstrainedDecisions: 0, lowSampleFallbacks: 0, fallbackPct: 0 };
+    response.aces = { strategyKey: 'G', version: 1, selectedPolicy: null, selectionBasis: 'validation',
+      simulationMode: 'TUNED', simulationStatus: 'COMPLETED', inspectedOnly: true, config: {}, liveEnabled: false,
+      readiness: { status: 'WARN', checks: {} }, qTable: [], uniqueStatesVisited: 0,
+      policies: [{ name: 'Q_LEARNING', transitions: [], executions: [],
+        metrics: { train: metrics, validation: metrics, test: metrics },
+        testEquity: { dates: equityDates, values: [0, 1, 2, 3, 4] },
+        economicCurve: equityDates.map((date, i) => ({ date, strategyNav: 1 + i / 10,
+          benchmarkNav: 1 + i / 20, requiredNav: 1 + i / 15, cagrDeficit: 0 })),
+      }] };
+    expect(strategyPresentation(response, 'aces').policy?.name).toBe('Q_LEARNING');
+    expect(combinedStrategyCurves(response, ['baseline', 'trend', 'multifactor', 'budget', 'aces']).rows
+      .some(row => row['nav:aces'] != null)).toBe(true);
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    await screen.findByTestId('strategy-combined-chart');
+    // Recharts legends don't render text in jsdom, so the observable signal
+    // for a drawn ACES line is its absence from the missing-curve note.
+    const combined = screen.getByTestId('strategy-combined-chart');
+    expect(combined).toHaveTextContent('No saved curve for');
+    expect(combined).toHaveTextContent('Adaptive Budget (NO_RESULT)');
+    expect(combined).not.toHaveTextContent('ACES');
+  });
+
+  it('lists families without a saved curve instead of hiding them', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    await screen.findByTestId('strategy-combined-chart');
+    expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('No saved curve for');
+    expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('ACES (ACES_NOT_RUN)');
+  });
+
+  it('hides the holding toggle when the stock is not in current positions', async () => {
+    renderChart();
+    await runAutoTuneAndGetPlot();
+    expect(screen.queryByTestId('holding-anchor-toggle')).not.toBeInTheDocument();
+  });
+
+  it('anchors all NAV lines at the holding buy date when the toggle is on', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'other', code: 'AAPL', name: 'Apple', purchaseDate: '2024-01-02', purchasePrice: 200, quantity: 5, account: 'Robinhood' },
+      { id: 'mine', code: 'sh600519', name: '贵州茅台', purchaseDate: '2024-06-03', purchasePrice: 100, quantity: 10, account: 'Robinhood' },
+    ]));
+    renderChart();
+    await runAutoTuneAndGetPlot();
+
+    const toggle = screen.getByTestId('holding-anchor-toggle');
+    expect(toggle).toHaveTextContent('自持仓 2024-06-03 起');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(toggle);
+    // Toggling moves the card to the standalone slot, so re-query it.
+    const anchoredToggle = screen.getByTestId('holding-anchor-toggle');
+    expect(anchoredToggle).toHaveAttribute('aria-pressed', 'true');
+    expect(anchoredToggle).toHaveTextContent('已锚定 2024-06-03');
+    const combined = screen.getByTestId('strategy-combined-chart');
+    expect(combined).toHaveTextContent('自 2024-06-03 起 · 3 根');
+    expect(combined).toHaveTextContent('按 1.0 起算');
+    fireEvent.click(anchoredToggle);
+    expect(screen.getByTestId('holding-anchor-toggle')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('strategy-combined-chart')).toHaveTextContent('最近 180 根');
+  });
+
+  it('marks each current-position bought point on the price chart line', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'early', code: '600519', name: '贵州茅台', purchaseDate: '2026-03-02', purchasePrice: 107, quantity: 10, account: 'Robinhood' },
+      { id: 'late', code: '600519', name: '贵州茅台', purchaseDate: '2026-03-05', purchasePrice: 112, quantity: 5, account: 'HSA' },
+    ]));
+    renderChart();
+    await screen.findByRole('img', { name: '技术指标' });
+
+    const markers = screen.getAllByTestId('holding-buy-marker');
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toHaveAttribute('aria-label', '2026-03-02 · 持仓买入 @107');
+    expect(markers[1]).toHaveAttribute('aria-label', '2026-03-05 · 持仓买入 @112');
+    expect(screen.getByTestId('trigger-legend')).toHaveTextContent('持仓买入');
+  });
+
+  it('shows no bought-point marker when the holding starts after the chart range', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'future', code: '600519', name: '贵州茅台', purchaseDate: '2026-04-01', purchasePrice: 120, quantity: 10, account: 'Robinhood' },
+    ]));
+    renderChart();
+    await screen.findByRole('img', { name: '技术指标' });
+
+    expect(screen.queryByTestId('holding-buy-marker')).not.toBeInTheDocument();
+    expect(screen.getByTestId('trigger-legend')).not.toHaveTextContent('持仓买入');
+  });
+
+  it('remembers trigger toggles separately for each stock', async () => {
+    window.localStorage.setItem(
+      visibleTriggersStorageKey('600519'),
+      JSON.stringify({ macd: true, obv: false, kdj: false, rsi: false, boll: false, cci: false,
+        dmi: false, mfi: false, compositeBuy: true, compositeSell: false }),
+    );
+    const rendered = render(
+      <UiLanguageProvider>
+        <StockIndicatorChart stockCode="600519" stockName="贵州茅台" />
+      </UiLanguageProvider>,
+    );
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    expect(screen.getByRole('button', { name: 'MACD' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'SELL' })).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'BOLL' }));
+    expect(JSON.parse(window.localStorage.getItem(visibleTriggersStorageKey('600519'))!).boll).toBe(true);
+
+    rendered.rerender(
+      <UiLanguageProvider>
+        <StockIndicatorChart stockCode="AAPL" />
+      </UiLanguageProvider>,
+    );
+    expect(screen.getByRole('button', { name: 'MACD' })).toHaveAttribute('aria-pressed', 'false');
+
+    rendered.rerender(
+      <UiLanguageProvider>
+        <StockIndicatorChart stockCode="600519" stockName="贵州茅台" />
+      </UiLanguageProvider>,
+    );
+    expect(screen.getByRole('button', { name: 'MACD' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'BOLL' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps the NAV card stacked under the price chart in holding view', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'mine', code: '600519', name: '贵州茅台', purchaseDate: '2024-06-03', purchasePrice: 100, quantity: 10, account: 'Robinhood' },
+    ]));
+    renderChart();
+    await runAutoTuneAndGetPlot();
+
+    const stacked = () => document.querySelector('.order-1 [data-testid="strategy-combined-chart"]');
+    expect(stacked()).not.toBeNull();
+    expect(document.querySelector('.order-4 [data-testid="strategy-combined-chart"]')).toBeNull();
+
+    // The card stays stacked when the holding view turns on: no position shift.
+    fireEvent.click(screen.getByTestId('holding-anchor-toggle'));
+    expect(screen.getByTestId('holding-anchor-toggle')).toHaveAttribute('aria-pressed', 'true');
+    expect(stacked()).not.toBeNull();
+    expect(document.querySelector('.order-4 [data-testid="strategy-combined-chart"]')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('holding-anchor-toggle'));
+    expect(stacked()).not.toBeNull();
+    expect(document.querySelector('.order-4 [data-testid="strategy-combined-chart"]')).toBeNull();
+  });
+
+  it('steps BOL constant and MACD triggers by 0.1', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    renderChart();
+    await screen.findByRole('img', { name: 'Technical indicators' });
+    expect(screen.getByLabelText('BOL constant')).toHaveAttribute('step', '0.1');
+    expect(screen.getByLabelText('MACD Buy')).toHaveAttribute('step', '0.1');
+    expect(screen.getByLabelText('MACD Sell')).toHaveAttribute('step', '0.1');
+    expect(screen.getByLabelText('KDJ Buy')).toHaveAttribute('step', 'any');
+  });
+
+  it('reads as one chart: header row on top, NAV info below the NAV plot', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    renderChart();
+    const priceChart = await screen.findByRole('img', { name: 'Technical indicators' });
+    // No legend toggle: the legend always shows, and the toggles stay in one
+    // scrollable row.
+    expect(screen.queryByRole('button', { name: /Legend/ })).not.toBeInTheDocument();
+    const legend = screen.getByTestId('trigger-legend');
+    expect(legend.compareDocumentPosition(priceChart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(legend.closest('.order-1')).toBeNull();
+    // The price section is always expanded: its label is plain text.
+    expect(screen.getByText('Technical indicator price chart').tagName).toBe('P');
+    // The composite score panel sits above the price plot as well.
+    const compositeTitle = screen.getByText('Composite score');
+    expect(compositeTitle.compareDocumentPosition(priceChart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const combined = await screen.findByTestId('strategy-combined-chart');
+    // The NAV card stacks chart-first via flex order: plot on top, info below.
+    expect(combined.className).toContain('flex-col');
+    const navChart = within(combined).getByTestId('strategy-nav-chart');
+    expect(navChart.className).toContain('order-1');
+    const navHeader = within(combined).getByRole('heading', { name: 'Adaptive budget / NAV' }).closest('div')!;
+    expect(navHeader.className).toContain('order-3');
+    // The strategy description sits right below the NAV plot.
+    expect(navChart.nextElementSibling).toHaveTextContent('2 available strategies are shown together');
+  });
+
+  it('fits the expanded legend to the section width and thins date ticks on narrow plots', async () => {
+    renderChart();
+    await screen.findByRole('img', { name: '技术指标' });
+    // The legend panel spans the full section width below the single header
+    // row instead of squeezing beside the title, so the expanded legend never
+    // overflows sideways.
+    const legend = screen.getByTestId('trigger-legend');
+    expect(legend.closest('.home-panel-card')).not.toBeNull();
+    expect(legend.closest('.order-1')).toBeNull();
+    expect(legend.closest('details')).toBeNull();
+    expect(selectDateTickCount(390)).toBe(3);
+    expect(selectDateTickCount(1280)).toBe(7);
+  });
+
+  it('shares one middle date axis between the stacked charts', async () => {
+    const response = buildAutoTuneResponse();
+    response.strategies.forEach(strategy => {
+      strategy.testEquity = { dates: indicatorDates, values: indicatorDates.map((_, index) => index) };
+    });
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    const priceChart = await screen.findByRole('img', { name: '技术指标' });
+    // No Auto Tune result yet: the price chart keeps its own date row.
+    expect(within(priceChart).getByText('2026-03-01')).toBeInTheDocument();
+    expect(screen.queryByTestId('shared-date-axis')).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    await screen.findByTestId('strategy-combined-chart');
+    const axis = screen.getByTestId('shared-date-axis');
+    expect(axis).toHaveTextContent('2026-03-01');
+    expect(axis).toHaveTextContent('2026-03-06');
+    // The price SVG hides its own date row while sharing.
+    expect(within(priceChart).queryByText('2026-03-01')).not.toBeInTheDocument();
+  });
+
+  it('keeps separate axes in the anchored holding view', async () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'mine', code: '600519', name: '贵州茅台', purchaseDate: '2024-06-03', purchasePrice: 100, quantity: 10, account: 'Robinhood' },
+    ]));
+    renderChart();
+    await runAutoTuneAndGetPlot();
+    expect(screen.queryByTestId('shared-date-axis')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('holding-anchor-toggle'));
+    expect(screen.queryByTestId('shared-date-axis')).not.toBeInTheDocument();
+    const priceChart = screen.getByRole('img', { name: '技术指标' });
+    expect(within(priceChart).getByText('2026-03-01')).toBeInTheDocument();
+  });
+
+  it('filters price-chart strategy markers to the holding period when anchored', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'mine', code: '600519', name: 'Kweichow Moutai', purchaseDate: '2026-03-03', purchasePrice: 100, quantity: 10, account: 'Robinhood' },
+    ]));
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    const dates = indicatorDates;
+    response.strategies[0].testDecisions = [
+      { signalDate: dates[0], date: dates[1], side: 'buy', status: 'executed', reason: 'signal',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 50, holdingPct: 50, tradeNavPct: 50,
+        executionPrice: 101, score: 7 },
+      { signalDate: dates[2], date: dates[3], side: 'sell', status: 'executed', reason: 'stop',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 100, holdingPct: 0, tradeNavPct: 40,
+        executionPrice: 110, score: null },
+    ];
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const priceChart = await screen.findByRole('img', { name: 'Technical indicators' });
+    const strategyMarkers = () => within(priceChart).getAllByRole('img')
+      .filter((node) => node.getAttribute('data-testid') !== 'holding-buy-marker');
+    expect(strategyMarkers()).toHaveLength(2);
+    // The current-position bought point stays on the line either way.
+    expect(screen.getByTestId('holding-buy-marker')).toHaveAccessibleName(/2026-03-03/);
+
+    fireEvent.click(screen.getByTestId('holding-anchor-toggle'));
+    const anchoredMarkers = strategyMarkers();
+    expect(anchoredMarkers).toHaveLength(1);
+    expect(anchoredMarkers[0]).toHaveAccessibleName(/SELL/);
+    expect(screen.getByTestId('holding-buy-marker')).toHaveAccessibleName(/2026-03-03/);
+  });
+
+  it('detects the earliest lot and rebases every series from the buy date', () => {
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'late', code: '600519', name: '贵州茅台', purchaseDate: '2024-09-02', purchasePrice: 110, quantity: 5, account: 'Robinhood' },
+      { id: 'early', code: '600519', name: '贵州茅台', purchaseDate: '2024-03-01', purchasePrice: 90, quantity: 5, account: '401K' },
+    ]));
+    const holding = findHoldingAnchor('600519');
+    expect(holding).toMatchObject({ purchaseDate: '2024-03-01', purchasePrice: 90 });
+    expect(findHoldingAnchor('AAPL')).toBeNull();
+
+    const rows = [
+      { date: '2024-01-02', 'nav:baseline': 1, 'nav:trend': 1, benchmarkNav: 1, requiredNav: 1 },
+      { date: '2024-03-01', 'nav:baseline': 1.1, 'nav:trend': 1.2, benchmarkNav: 1.05, requiredNav: 1.1 },
+      { date: '2024-06-03', 'nav:baseline': 1.21, 'nav:trend': null, benchmarkNav: null, requiredNav: 1.2 },
+    ];
+    const anchored = rebaseRowsFromPurchaseDate(rows, '2024-03-01');
+    expect(anchored.anchorDate).toBe('2024-03-01');
+    expect(anchored.rows).toHaveLength(2);
+    expect(anchored.rows[0]['nav:baseline']).toBeCloseTo(1);
+    expect(anchored.rows[1]['nav:baseline']).toBeCloseTo(1.1);
+    expect(anchored.rows[0]['nav:trend']).toBeCloseTo(1);
+    expect(anchored.rows[1]['nav:trend']).toBeNull();
+    expect(anchored.rows[0].benchmarkNav).toBeCloseTo(1);
+
+    expect(rebaseRowsFromPurchaseDate(rows, '2026-01-01')).toEqual({ rows: [], anchorDate: null });
+    const fromStart = rebaseRowsFromPurchaseDate(rows, '2020-01-01');
+    expect(fromStart.anchorDate).toBe('2024-01-02');
+    expect(fromStart.rows).toHaveLength(3);
+  });
+
+  it('draws composite signals hollow and OBV as diamonds so they differ from strategy triangles', async () => {
+    renderChart();
+    const chart = await screen.findByRole('img', { name: '技术指标' });
+    // The default-on composite BUY signal must be hollow, unlike filled
+    // strategy execution triangles.
+    const hollowTriangles = chart.querySelectorAll('polygon[fill="none"]');
+    expect(hollowTriangles.length).toBeGreaterThan(0);
+    expect(hollowTriangles[0].getAttribute('stroke')).toBe('#1faa3a');
+
+    fireEvent.click(screen.getByRole('button', { name: 'OBV' }));
+    const diamonds = Array.from(chart.querySelectorAll('polygon')).filter(
+      (node) => (node.getAttribute('points') ?? '').trim().split(/\s+/).length === 4,
+    );
+    expect(diamonds.length).toBeGreaterThan(0);
+    expect(diamonds[0].getAttribute('fill')).toBe('#1faa3a');
+
+    fireEvent.click(screen.getByRole('button', { name: 'BOLL' }));
+    expect(chart.querySelector('circle[fill="none"]')?.getAttribute('stroke')).toBe('#7c3aed');
+  });
+
+  it('matches legend swatches to the disambiguated marker glyphs', async () => {
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    const obvBuy = screen.getByText('OBV 买入触发').closest('span')!;
+    expect(obvBuy.querySelector('span')).toHaveStyle({ transform: 'rotate(45deg)' });
+    const compositeBuy = screen.getByText('复合 BUY 信号').closest('span')!;
+    expect(compositeBuy.querySelector('span')?.getAttribute('style')).toContain('webkit-text-stroke');
+  });
+
+  it('colors trade sides correctly, groups by side, and filters to the holding period', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    window.localStorage.setItem(CURRENT_POSITIONS_STORAGE_KEY, JSON.stringify([
+      { id: 'mine', code: '600519', name: 'Kweichow Moutai', purchaseDate: '2024-06-03', purchasePrice: 100, quantity: 10, account: 'Robinhood' },
+    ]));
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    response.strategies[0].testDecisions = [
+      { signalDate: '2024-02-01', date: '2024-03-01', side: 'buy', status: 'executed', reason: 'signal',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 50, holdingPct: 50, tradeNavPct: 50,
+        executionPrice: 90, score: 7 },
+      { signalDate: '2024-08-01', date: '2024-09-02', side: 'sell', status: 'executed', reason: 'stop',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 100, holdingPct: 0, tradeNavPct: 40,
+        executionPrice: 110, score: null },
+    ];
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const combined = await screen.findByTestId('strategy-combined-chart');
+
+    expect(combined).toHaveTextContent('Executed trade details (2)');
+    expect(combined).toHaveTextContent('BUY (1)');
+    expect(combined).toHaveTextContent('SELL (1)');
+    const buySide = within(combined).getByText('BUY', { selector: 'span' });
+    expect(buySide).toHaveStyle({ color: '#1faa3a' });
+    const sellSide = within(combined).getByText('SELL', { selector: 'span' });
+    expect(sellSide).toHaveStyle({ color: '#d62728' });
+
+    fireEvent.click(screen.getByTestId('holding-anchor-toggle'));
+    const anchored = screen.getByTestId('strategy-combined-chart');
+    expect(anchored).toHaveTextContent('Executed trade details (1)');
+    expect(anchored).toHaveTextContent('holding since 2024-06-03');
+    expect(anchored).toHaveTextContent('SELL (1)');
+    expect(anchored).not.toHaveTextContent('BUY (1)');
+  });
+
+  it('pairs each sell with the latest buy and sorts chronologically', () => {
+    const marks = withTradePnL([
+      { date: '2024-09-02', side: 'SELL', price: 99, reason: 'stop', status: 'executed', budget: 40 },
+      { date: '2024-06-03', side: 'BUY', price: 95, reason: 'signal', status: 'executed', budget: 30 },
+      { date: '2024-03-01', side: 'BUY', price: 90, reason: 'signal', status: 'executed', budget: 50 },
+      { date: '2024-01-02', side: 'SELL', price: 100, reason: 'stop', status: 'executed', budget: 40 },
+    ]);
+    expect(marks.map(mark => mark.date)).toEqual(['2024-01-02', '2024-03-01', '2024-06-03', '2024-09-02']);
+    expect(marks[0].pnlPct).toBeNull();
+    expect(marks[1].pnlPct).toBeNull();
+    expect(marks[2].pnlPct).toBeNull();
+    expect(marks[3].pnlPct).toBeCloseTo((99 / 95 - 1) * 100);
+  });
+
+  it('does not present the mandatory segment-end liquidation as a sell trigger', () => {
+    const response = buildAutoTuneResponse();
+    const strategy = response.strategies[0] as AutoTuneStrategyResult;
+    strategy.testDecisions = [
+      { signalDate: '2026-03-05', date: '2026-03-06', side: 'buy', status: 'executed', reason: 'signal',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 50, holdingPct: 50, tradeNavPct: 50,
+        executionPrice: 100, score: 7 },
+      { signalDate: '2026-03-10', date: '2026-03-10', side: 'sell', status: 'executed', reason: 'segment_end',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 100, holdingPct: 0, tradeNavPct: 50,
+        executionPrice: 101, score: null },
+    ];
+
+    expect(strategyPresentation(response, 'baseline').marks.filter(isVisibleTradeMark)).toHaveLength(1);
+    expect(strategyPresentation(response, 'baseline').marks.filter(isVisibleTradeMark)[0].side).toBe('BUY');
+  });
+
+  it('orders trade details by date with price and colored P/L, and dots trades on the NAV line', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
+    const response: AutoTuneResponse = buildAutoTuneResponse();
+    response.strategies[0].testDecisions = [
+      { signalDate: '2024-08-01', date: '2024-09-02', side: 'sell', status: 'executed', reason: 'stop',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 100, holdingPct: 0, tradeNavPct: 40,
+        executionPrice: 99, score: null },
+      { signalDate: '2024-05-01', date: '2024-06-03', side: 'buy', status: 'executed', reason: 'signal',
+        suggestedBudgetPct: 30, executedBudgetPct: 30, cashAfterPct: 70, holdingPct: 30, tradeNavPct: 30,
+        executionPrice: 95, score: 6 },
+      { signalDate: '2024-02-01', date: '2024-03-01', side: 'buy', status: 'executed', reason: 'signal',
+        suggestedBudgetPct: 50, executedBudgetPct: 50, cashAfterPct: 50, holdingPct: 50, tradeNavPct: 50,
+        executionPrice: 90, score: 7 },
+    ];
+    vi.mocked(stocksApi.autoTune).mockResolvedValue(response);
+    renderChart();
+    fireEvent.click(await screen.findByRole('button', { name: 'Auto Tune' }));
+    const combined = await screen.findByTestId('strategy-combined-chart');
+
+    expect(combined).toHaveTextContent('Executed trade details (3)');
+    const text = combined.textContent ?? '';
+    expect(text.indexOf('2024-03-01')).toBeLessThan(text.indexOf('2024-06-03'));
+    expect(combined).toHaveTextContent('@90.00');
+    expect(combined).toHaveTextContent('@99.00');
+    // Sell P/L is measured against the latest buy: 99/95-1 = +4.2%.
+    expect(combined).toHaveTextContent('+4.2%');
+    expect(combined).toHaveTextContent('excluding fees');
+
+    // NAV trade dots pin each executed mark to the baseline NAV value and
+    // skip dates outside the displayed rows.
+    const rows = combinedStrategyCurves(response, ['baseline']).rows;
+    const ordered = withTradePnL(strategyPresentation(response, 'baseline').marks);
+    const dots = navTradeDots(rows, ordered, 'baseline');
+    expect(dots).toHaveLength(3);
+    expect(dots[0]).toMatchObject({ date: '2024-03-01', side: 'BUY' });
+    expect(dots[0].nav).toBeCloseTo(1 + 2.5 / 100);
+    expect(dots[2]).toMatchObject({ date: '2024-09-02', side: 'SELL' });
+    expect(navTradeDots(rows.slice(0, 1), strategyPresentation(response, 'baseline').marks, 'baseline')).toEqual([]);
+  });
+
+  it('shows trigger thresholds expanded with restore next to the title', async () => {
     window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
     renderChart();
     await screen.findByRole('button', { name: 'Auto Tune' });
-    expect(screen.getByText('Trigger thresholds').closest('details')).not.toHaveAttribute('open');
+    const title = screen.getByText('Trigger thresholds');
+    expect(title.tagName).toBe('SPAN');
+    expect(title.closest('details')).toBeNull();
+    const titleRow = screen.getByRole('button', { name: 'Restore defaults' }).closest('div')!;
+    expect(titleRow.textContent).toContain('Trigger thresholds');
     expect(screen.getByText('Advanced tuning settings').closest('details')).not.toHaveAttribute('open');
   });
 
@@ -734,18 +1222,22 @@ describe('StockIndicatorChart auto tune panel', () => {
     expect(screen.getAllByTestId('strategy-nav-chart')).toHaveLength(1);
   });
 
-  it('replaces legacy indicator trigger toggles with the strategy select', async () => {
+  it('keeps indicator trigger toggles alongside the strategy select', async () => {
     window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'en');
     renderChart();
     await screen.findByRole('button', { name: 'Auto Tune' });
 
     const strategySelect = screen.getByTestId('trigger-strategy-select') as HTMLSelectElement;
-    expect(strategySelect).toBeDisabled();
+    expect(strategySelect).toBeEnabled();
     expect(Array.from(strategySelect.options).map(option => option.textContent)).toEqual([
-      'Baseline', 'Trend', 'Multi-factor', 'Adaptive Budget', 'ACES',
+      'Baseline', 'Trend', 'Multi-factor', 'Adaptive Budget', 'ACES', 'MATR · Macro Router',
     ]);
-    expect(screen.queryByText('BOLL Buy Trigger')).not.toBeInTheDocument();
-    expect(screen.queryByText('Composite BUY Signal')).not.toBeInTheDocument();
+    expect(screen.getByTestId('trigger-toggles').className).toContain('flex-nowrap');
+    expect(screen.getByTestId('trigger-legend')).toBeInTheDocument();
+    expect(screen.getByText('BOLL Buy Trigger')).toBeInTheDocument();
+    expect(screen.getByText('Composite BUY Signal')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'BOLL' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'BUY' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('shows extension factors in the composite breakdown with a dynamic max score', async () => {
@@ -917,7 +1409,7 @@ describe('StockIndicatorChart auto tune panel', () => {
     });
   });
 
-  it('notifies threshold listeners when a threshold input changes', async () => {
+  it('notifies threshold listeners when a threshold input is committed', async () => {
     renderChart();
     await screen.findByRole('button', { name: 'Auto Tune' });
 
@@ -928,10 +1420,32 @@ describe('StockIndicatorChart auto tune panel', () => {
     window.addEventListener('dsa-indicator-thresholds-changed', handler);
     try {
       const buyInput = screen.getByLabelText('BUY 触发分') as HTMLInputElement;
+      // Threshold edits commit on blur/Enter (typing alone only updates the
+      // local draft to avoid reloading the chart on every keystroke).
       fireEvent.change(buyInput, { target: { value: '5' } });
+      expect(seen).not.toContain('600519');
+      fireEvent.blur(buyInput);
       expect(seen).toContain('600519');
     } finally {
       window.removeEventListener('dsa-indicator-thresholds-changed', handler);
     }
+  });
+
+  it('does not reload indicators while typing threshold drafts', async () => {
+    renderChart();
+    await screen.findByRole('button', { name: 'Auto Tune' });
+    const callsBefore = vi.mocked(stocksApi.getIndicators).mock.calls.length;
+    const buyInput = screen.getByLabelText('BUY 触发分') as HTMLInputElement;
+    fireEvent.change(buyInput, { target: { value: '5' } });
+    fireEvent.change(buyInput, { target: { value: '55' } });
+    // Typing only updates the local draft; the chart must not reload (and
+    // shift the page) on every keystroke.
+    expect(vi.mocked(stocksApi.getIndicators).mock.calls.length).toBe(callsBefore);
+    fireEvent.blur(buyInput);
+    await waitFor(() => {
+      expect(vi.mocked(stocksApi.getIndicators).mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    const lastArgs = vi.mocked(stocksApi.getIndicators).mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(lastArgs?.compositeBuyThreshold).toBe(55);
   });
 });

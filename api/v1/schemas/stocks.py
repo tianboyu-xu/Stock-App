@@ -358,6 +358,9 @@ class AutoTuneResponse(BaseModel):
     allocation: Optional[Dict[str, Any]] = Field(None, description="冻结技术策略后的资金配置比较、转移与 Q 表")
     test_prices: Optional[Dict[str, Any]] = Field(None, description="Test-session closing prices for execution charts")
     aces: Optional[Dict[str, Any]] = Field(None, description="Independent Strategy G ACES study; A–F remain unchanged")
+    macro_router: Optional[Dict[str, Any]] = Field(
+        None, description="MATR quarterly macro routing, vintage provenance and two-week execution study"
+    )
     fine_tune: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(

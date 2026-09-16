@@ -155,11 +155,17 @@ GEMINI_API_KEY=AIzac...
 OLLAMA_API_BASE=http://localhost:11434
 LITELLM_MODEL=ollama/qwen3.8:27b
 # 轻量替代（约 6.6GB）：LITELLM_MODEL=ollama/qwen3.5:9b
+# 启动 Web/API 时自动检查并后台启动本机 Ollama（默认开启）
+OLLAMA_AUTO_START=true
+# 自动启动后等待服务就绪的最长时间（秒）
+OLLAMA_AUTO_START_TIMEOUT_SECONDS=60
 ```
 
 > **重要**：Ollama 必须使用 `OLLAMA_API_BASE` 配置，**不要**使用 `OPENAI_BASE_URL`，否则系统会错误拼接 URL（如 404、`api/generate/api/show`）。远程 Ollama 时，将 `OLLAMA_API_BASE` 设为实际地址（如 `http://192.168.1.100:11434`）。当前依赖约束为 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0`（与 requirements.txt 一致）。
 
 > **恭喜！小白读到这里就可以去运行程序了！**
+
+启动 `server.py`、`webui.py` 或 `main.py --serve-only` 时，程序会检查配置的本机 Ollama；未运行时会在后台执行 `ollama serve`。远程 Ollama 不会被本机自动启动。设置 `OLLAMA_AUTO_START=false` 可关闭此行为；该检查失败不会阻止 Web/API 启动。
 > 想测测看通没通？在主目录打开命令行输入：`python scripts/check_env.py --llm`
 
 ---

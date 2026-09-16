@@ -342,6 +342,7 @@ const HomePage: React.FC = () => {
   const [recentSignals, setRecentSignals] = useState<Record<string, CompositeTriggerInput>>({});
   const [recentSignalsState, setRecentSignalsState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [recentSignalsRefreshVersion, setRecentSignalsRefreshVersion] = useState(0);
+  const [summaryChartCode, setSummaryChartCode] = useState<string | null>(null);
   const [isStockBarInitialLoadSettled, setIsStockBarInitialLoadSettled] = useState(false);
   const [completedTaskRefreshPendingCounts, setCompletedTaskRefreshPendingCounts] = useState<Map<string, number>>(
     new Map(),
@@ -876,11 +877,20 @@ const HomePage: React.FC = () => {
   }, [clearMarketReviewState, selectHistoryItem]);
 
   const handleSummaryStockSelect = useCallback((entry: CompositeSummaryEntry) => {
-    if (typeof entry.recordId !== 'number') {
-      return;
+    const code = (entry.code ?? '').trim();
+    if (code) {
+      // Every summary item links to its real-time price chart so the latest
+      // 7-day / 3-day composite trigger can be verified live in StockIndicatorChart.
+      setSummaryChartCode(code);
     }
-    handleHistoryItemClick(entry.recordId);
+    if (typeof entry.recordId === 'number') {
+      handleHistoryItemClick(entry.recordId);
+    }
   }, [handleHistoryItemClick]);
+
+  const handleCloseSummaryChartPreview = useCallback(() => {
+    setSummaryChartCode(null);
+  }, []);
 
   const handleRefreshWatchlist = useCallback(async () => {
     await Promise.all([
@@ -1897,7 +1907,7 @@ const HomePage: React.FC = () => {
           <section
             ref={dashboardScrollRef}
             data-testid="home-dashboard-scroll"
-            className="flex-1 min-w-0 min-h-0 overflow-x-auto overflow-y-auto px-3 pb-4 md:px-6 touch-pan-y"
+            className="flex-1 min-w-0 min-h-0 overflow-x-auto overflow-y-auto px-3 pb-4 md:px-6 touch-pan-y [scrollbar-gutter:stable]"
           >
             {marketReviewNotice ? (
               <div className="mb-3">
@@ -1944,8 +1954,44 @@ const HomePage: React.FC = () => {
               onRetry={() => setRecentSignalsRefreshVersion((version) => version + 1)}
               onStockSelect={handleSummaryStockSelect}
               selectedRecordId={selectedReport?.meta.id}
-              selectedStockCode={selectedReport?.meta.stockCode}
+              selectedStockCode={summaryChartCode ?? selectedReport?.meta.stockCode}
             />
+
+            {!marketReviewReport && summaryChartCode && getStockCodeKey(summaryChartCode) !== getStockCodeKey(priceHistoryCodeKey) ? (
+              <section
+                data-testid="summary-chart-preview"
+                aria-label={t('home.summaryChartPreviewTitle', { code: summaryChartCode })}
+                className="glass-card mb-4 overflow-hidden"
+              >
+                <div className="flex items-start justify-between gap-3 border-b border-subtle px-3 py-2.5 sm:px-4">
+                  <div className="min-w-0 space-y-0.5">
+                    <h3 className="truncate text-sm font-medium text-foreground">
+                      {t('home.summaryChartPreviewTitle', { code: summaryChartCode })}
+                    </h3>
+                    <p className="text-[11px] leading-relaxed text-muted-text">
+                      {t('home.summaryChartPreviewDescription')}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xsm"
+                    className="h-7 w-7 shrink-0 px-0"
+                    onClick={handleCloseSummaryChartPreview}
+                    aria-label={t('home.summaryChartPreviewClose', { code: summaryChartCode })}
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </div>
+                <div className="px-3 py-3 sm:px-4">
+                  <StockIndicatorChart
+                    key={`summary-indicator-${summaryChartCode}`}
+                    stockCode={summaryChartCode}
+                    stockName={watchlistRows.find((row) => getStockCodeKey(row.code) === getStockCodeKey(summaryChartCode))?.latestItem?.stockName ?? summaryChartCode}
+                  />
+                </div>
+              </section>
+            ) : null}
 
             {!marketReviewReport && isLoadingReport ? (
               <div className="flex h-full flex-col items-center justify-center">

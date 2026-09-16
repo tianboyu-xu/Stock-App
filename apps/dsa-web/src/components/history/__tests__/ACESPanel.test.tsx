@@ -4,21 +4,20 @@ import { ACESResults, ACESSetup } from '../ACESPanel';
 import type { ACESReport } from '../../../api/stocks';
 
 describe('independent Strategy G setup', () => {
-  it('is opt-in, produces versioned defaults and can be disabled independently', () => {
+  it('is always on, produces versioned aggressive defaults', () => {
     const onChange = vi.fn();
     render(<ACESSetup onChange={onChange} language="en" disabled={false} />);
-    expect(screen.queryByLabelText('Initial budget')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Include ACES alongside A–F'));
+    expect(screen.getByLabelText('Initial budget')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Include ACES alongside A–F')).not.toBeInTheDocument();
     expect(onChange.mock.lastCall?.[0]).toMatchObject({ version: 1, enabled: true, policy_mode: 'COMPARE', initial_budget: 10000,
-      allocation: { economic: { target_cagr: .3 } } });
-    fireEvent.click(screen.getByLabelText('Include ACES alongside A–F'));
-    expect(onChange).toHaveBeenLastCalledWith(undefined, true);
+      buy_thresholds: [6, 7, 8], sell_thresholds: [-6, -7, -8],
+      risk: { maximum_exposure: 1 },
+      allocation: { economic: { target_cagr: .3, allowed_max_drawdown: .25 } } });
   });
 
   it('blocks invalid thresholds and lets presets populate risk inputs', () => {
     const onChange = vi.fn();
     render(<ACESSetup onChange={onChange} language="en" disabled={false} />);
-    fireEvent.click(screen.getByLabelText('Include ACES alongside A–F'));
     fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'Conservative' } });
     expect(onChange.mock.lastCall?.[0]).toMatchObject({ risk: { maximum_exposure: .6 }, allocation: { economic: { allowed_max_drawdown: .1 } } });
     fireEvent.change(screen.getByLabelText('BUY'), { target: { value: '-6' } });
